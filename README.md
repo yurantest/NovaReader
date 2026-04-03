@@ -94,7 +94,7 @@
 
 ## 📧 Контакты
 
-- **Автор:** Ваше Имя
-- **Telegram:** @ваш_ник
-- **GitHub:** [github.com/ваш_ник/NovaReader](https://github.com/ваш_ник/NovaReader)
+- **Автор:** yuranZO
+- **Telegram:**
+- **GitHub:** [github.com/yurantest/NovaReader](https://github.com/yurantest/NovaReader)
 
