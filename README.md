@@ -47,7 +47,15 @@
 1. Скачайте `NovaReader_Linux_v1.0.tar.gz`
 2. Распакуйте: `tar -xzf NovaReader_Linux_v1.0.tar.gz`
 3. Запустите: `./NovaReader`
+---
 
+## 📦 Исходный код
+
+Полный исходный код (включая папку `foliate-js`) доступен для скачивания в разделе **Releases**:
+
+👉 [Скачать исходный код NovaReader_Source.zip](https://github.com/yurantest/NovaReader/releases/tag/NovaReader)
+
+Исходный код прилагается к каждому релизу в виде отдельного архива.
 > **Примечание:** Для работы TTS с голосами Piper скачайте голоса через меню настроек.
 
 ---
@@ -78,9 +86,11 @@
 
 ---
 
-## 📝 Лицензия
+## 📄 Лицензия
 
-Этот проект распространяется под лицензией **MIT**.
+Этот проект распространяется под лицензией **GNU Lesser General Public License v3.0 (LGPL-3.0)**.
+
+Подробнее: [https://www.gnu.org/licenses/lgpl-3.0.html](https://www.gnu.org/licenses/lgpl-3.0.html)
 
 ---
 
