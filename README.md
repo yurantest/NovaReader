@@ -37,6 +37,19 @@
 ---
 
 ## 🚀 Установка и запуск
+
+### Windows
+1. Скачайте `NovaReader_Windows_v1.0.zip`
+2. Распакуйте в любую папку
+3. Запустите `NovaReader.exe`
+
+### Linux
+1. Скачайте `NovaReader_Linux_v1.0.tar.gz`
+2. Распакуйте: `tar -xzf NovaReader_Linux_v1.0.tar.gz`
+3. Запустите: `./NovaReader`
+
+---
+
 ## 📦 Установка зависимостей
 
 Для корректной работы программы необходимы системные библиотеки **PortAudio** (для работы движка TTS) и **XCB** (для отображения графического интерфейса на базе Qt).
@@ -53,17 +66,6 @@ sudo dnf install portaudio-devel libxcb-cursor
 ### 🐧 Arch Linux / Garuda / Manjaro
 sudo pacman -S portaudio xcb-util-cursor
 
----
-
-### Windows
-1. Скачайте `NovaReader_Windows_v1.0.zip`
-2. Распакуйте в любую папку
-3. Запустите `NovaReader.exe`
-
-### Linux
-1. Скачайте `NovaReader_Linux_v1.0.tar.gz`
-2. Распакуйте: `tar -xzf NovaReader_Linux_v1.0.tar.gz`
-3. Запустите: `./NovaReader`
 ---
 
 ## 📦 Исходный код
