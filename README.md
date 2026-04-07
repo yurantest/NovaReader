@@ -37,6 +37,23 @@
 ---
 
 ## 🚀 Установка и запуск
+## 📦 Установка зависимостей
+
+Для корректной работы программы необходимы системные библиотеки **PortAudio** (для работы движка TTS) и **XCB** (для отображения графического интерфейса на базе Qt).
+
+Выполните команду, соответствующую вашей операционной системе:
+
+### 🐧 Debian / Ubuntu / Runtu / Linux Mint
+
+sudo apt update && sudo apt install portaudio19-dev libxcb-cursor0
+
+### 🐧 Fedora / RHEL
+sudo dnf install portaudio-devel libxcb-cursor
+
+### 🐧 Arch Linux / Garuda / Manjaro
+sudo pacman -S portaudio xcb-util-cursor
+
+---
 
 ### Windows
 1. Скачайте `NovaReader_Windows_v1.0.zip`
