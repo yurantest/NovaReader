@@ -82,8 +82,6 @@ sudo pacman -S portaudio xcb-util-cursor
 
 Полный исходный код (включая папку `foliate-js`) доступен для скачивания в разделе **Releases**:
 
-👉 [Скачать исходный код NovaReader_Source.zip](https://github.com/yurantest/NovaReader/releases/tag/NovaReader)
-
 Исходный код прилагается к каждому релизу в виде отдельного архива.
 > **Примечание:** Для работы TTS с голосами Piper скачайте голоса через меню настроек.
 
@@ -128,7 +126,7 @@ sudo pacman -S portaudio xcb-util-cursor
 - [Foliate.js](https://github.com/johnfactotum/foliate) — ядро рендеринга книг
 - [Piper TTS](https://github.com/rhasspy/piper) — движок синтеза речи
 - [PyQt6](https://riverbankcomputing.com/software/pyqt/) — фреймворк интерфейса
-
+- [Fb2c](https://github.com/rupor-github/fb2cng) — конвертер FB2 в EPUB
 ---
 
 ## 📧 Контакты
