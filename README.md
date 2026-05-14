@@ -20,13 +20,13 @@
 ## 🖼️ Скриншоты
 
 <!-- Вставьте сюда пути к скриншотам -->
-[Библиотека
+Библиотека
 <img width="1366" height="722" alt="Снимок экрана_20260514_075702" src="https://github.com/user-attachments/assets/2baa3b6e-8224-43a6-8755-825ca57eb769" />
 
 !Чтение
 <img width="1360" height="733" alt="Снимок экрана_20260514_075901" src="https://github.com/user-attachments/assets/bc3fb6be-7e8e-4524-9def-91a7b27ef3a9" />
 
-!Настройки TTS
+!Настройки
 <img width="1360" height="733" alt="Снимок экрана_20260514_075919" src="https://github.com/user-attachments/assets/4795212f-e64d-4d66-87c5-a80843c69308" />
 <img width="1360" height="733" alt="Снимок экрана_20260514_080652" src="https://github.com/user-attachments/assets/859ec835-f940-4e16-8439-5ebdcb8809a4" />
 <img width="1360" height="733" alt="Снимок экрана_20260514_101948" src="https://github.com/user-attachments/assets/3f6ac489-4632-4cd7-ad30-8e85c81f2f96" />
