@@ -2,7 +2,8 @@
 
 **Удобная читалка электронных книг с поддержкой TTS и синхронизацией**
 
-[![Version](https://img.shields.io/badge/version-1.0-blue.svg)]()
+<img width="396" height="253" alt="Снимок экрана_20260514_102704" src="https://github.com/user-attachments/assets/0b874e94-5c18-445d-86b5-eb61b10471e2" />
+
 
 ---
 ## ✨ Возможности
