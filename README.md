@@ -5,16 +5,6 @@
 [![Version](https://img.shields.io/badge/version-1.0-blue.svg)]()
 
 ---
-
-<img width="1366" height="722" alt="Снимок экрана_20260514_075702" src="https://github.com/user-attachments/assets/a2dd47ba-c8f2-41ed-974b-49b38fff9d22" />
-
-<img width="1360" height="733" alt="Снимок экрана_20260514_075901" src="https://github.com/user-attachments/assets/c7170f5f-883f-47aa-8093-38e8fd8ce2fb" />
-
-<img width="1360" height="733" alt="Снимок экрана_20260514_075919" src="https://github.com/user-attachments/assets/721db51a-bff4-4e01-9e43-9ad578610520" />
-
-<img width="1360" height="733" alt="Снимок экрана_20260514_080652" src="https://github.com/user-attachments/assets/90bd0e80-af9c-4b06-a566-0e37fddedf8e" />
-
----
 ## ✨ Возможности
 
 - 📖 **Поддержка форматов:** FB2, EPUB, PDF, CBZ (комиксы)
@@ -30,9 +20,15 @@
 ## 🖼️ Скриншоты
 
 <!-- Вставьте сюда пути к скриншотам -->
-![Библиотека](screenshots/library.png)
-![Чтение](screenshots/reader.png)
-![Настройки TTS](screenshots/tts.png)
+[Библиотека
+<img width="1366" height="722" alt="Снимок экрана_20260514_075702" src="https://github.com/user-attachments/assets/2baa3b6e-8224-43a6-8755-825ca57eb769" />
+
+!Чтение
+<img width="1360" height="733" alt="Снимок экрана_20260514_075901" src="https://github.com/user-attachments/assets/bc3fb6be-7e8e-4524-9def-91a7b27ef3a9" />
+
+!Настройки TTS
+
+
 
 ---
 
