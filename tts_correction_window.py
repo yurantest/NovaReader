@@ -161,7 +161,7 @@ class TTSCorrectionWindow(QDialog):
         self.table.setItem(row, 1, correct_item)
         
         # Кнопка удаления
-        del_btn = QPushButton("✕")
+        del_btn = QPushButton("")
         del_btn.setFixedSize(32, 32)
         del_btn.setStyleSheet("""
             QPushButton {
@@ -228,7 +228,7 @@ class TTSCorrectionWindow(QDialog):
         
         # Визуальное подтверждение
         orig_text = self.save_btn.text()
-        self.save_btn.setText("✓ Сохранено")
+        self.save_btn.setText(" Сохранено")
         self.save_btn.setEnabled(False)
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(1500, lambda: (

@@ -36,11 +36,11 @@ class PiperVoiceDownloader:
             "json": "https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/denis/medium/ru_RU-denis-medium.onnx.json"
         },
         {
-            "name": "ru_RU_dmitry_medium",
+            "name": "ru_RU_dmitri_medium",
             "display_name": "Дмитрий",
             "quality": "medium",
-            "onnx": "https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitry/medium/ru_RU-dmitry-medium.onnx",
-            "json": "https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitry/medium/ru_RU-dmitry-medium.onnx.json"
+            "onnx": "https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx",
+            "json": "https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx.json"
         },
         {
             "name": "ru_RU_irina_medium",

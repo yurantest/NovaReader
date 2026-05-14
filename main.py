@@ -115,10 +115,10 @@ def _load_flags_from_file():
         current = os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS', '')
         # Добавляем флаги из файла в начало (чтобы их можно было переопределить)
         os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = f"{content} {current}".strip()
-        print(f"[App] ✅ Загружены дополнительные флаги из {flags_file.name}")
+        print(f"[App]  Загружены дополнительные флаги из {flags_file.name}")
         return True
     except Exception as e:
-        print(f"[App] ⚠️ Ошибка чтения {flags_file.name}: {e}")
+        print(f"[App]  Ошибка чтения {flags_file.name}: {e}")
         return False
 
 
@@ -140,18 +140,13 @@ if sys.platform != 'win32':
         pass
 
 if sys.platform == 'win32':
-    print("[App] ✅ Настроен рендерер: DirectX 11 (D3D11) + memory flags")
-    print("[App] ✅ Включен режим single-process для экономии памяти")
+    pass  # рендерер настроен выше через env flags
 elif sys.platform == 'linux':
-    print("[App] ✅ Настроен рендерер: Vulkan (ANGLE) + memory flags")  # ← обновлено
-    print("[App] ✅ Включен режим single-process для экономии памяти")
-    if os.path.exists('/usr/share/drirc.d'):
-        print("[App] ✅ Обнаружены Mesa драйверы")
+    pass  # рендерер настроен выше через env flags
 
 # Настройка путей Qt WebEngine для скомпилированной версии
 if getattr(sys, 'frozen', False):
     app_dir = Path(sys.executable).parent
-    print(f"[App] Запущена скомпилированная версия, папка: {app_dir}")
 
     # Ищем QtWebEngineProcess
     for base_dir in [app_dir, app_dir / '_internal', app_dir / 'PyQt6', app_dir / 'PyQt6' / 'Qt6']:
@@ -160,44 +155,37 @@ if getattr(sys, 'frozen', False):
         proc_path = base_dir / 'libexec' / 'QtWebEngineProcess.exe'
         if proc_path.exists():
             os.environ['QTWEBENGINE_PROCESS_PATH'] = str(proc_path)
-            print(f"[App] ✅ Найден QtWebEngineProcess: {proc_path}")
             break
-
-        # Linux
         proc_path = base_dir / 'libexec' / 'QtWebEngineProcess'
         if proc_path.exists():
             os.environ['QTWEBENGINE_PROCESS_PATH'] = str(proc_path)
-            print(f"[App] ✅ Найден QtWebEngineProcess: {proc_path}")
             break
-else:
-    print("[App] Запущен в режиме разработки")
 
-# ── Диагностика флагов ──────────────────────────────────────────────────────
-# Выводим активные Chromium-флаги чтобы убедиться что они применяются.
-# Особенно важно при компиляции: --single-process, --disable-gpu-shader-disk-cache,
-# --max-old-space-size должны присутствовать — иначе память 1.5+ ГБ.
+# ── Диагностика флагов (только в debug-режиме, буферизируем) ───────────────
 _active_flags = os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS', '(не установлены!)')
 _key_flags = ['--single-process', '--disable-gpu-shader-disk-cache',
               '--disable-web-security', '--disk-cache-size=0',
               '--max-old-space-size=256']
 _missing = [f for f in _key_flags if f not in _active_flags]
+# Сохраняем диагностику — выведем только если debug_log=True
+_startup_diag = []
 if _missing:
-    print(f"[App] ⚠️  ОТСУТСТВУЮТ ключевые флаги: {', '.join(_missing)}")
-else:
-    print(f"[App] ✅ Chromium флаги установлены ({len(_active_flags)} символов)")
-print(f"[App] Флаги: {_active_flags[:140]}{'...' if len(_active_flags) > 140 else ''}")
+    _startup_diag.append(f"[App]   ОТСУТСТВУЮТ ключевые флаги: {', '.join(_missing)}")
+_startup_diag.append(f"[App]  Chromium флаги: {_active_flags[:140]}{'...' if len(_active_flags) > 140 else ''}")
 
 from PyQt6.QtWidgets import QApplication, QSplashScreen
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFontDatabase, QPixmap, QPainter, QColor, QFont
 import time
+import subprocess
 
 
 def _setup_logging(config):
-    """Настройка лога — вызывается после инициализации config.
-    Если debug_log=True — пишем в файл.
-    Если Windows + скомпилировано + debug_log=False — глушим вывод.
+    """Настройка логирования.
+    debug_log=True  → все print() и ошибки пишутся в файл debug.log.
+    debug_log=False → stdout подавляется, stderr остаётся (реальные ошибки видны).
     """
+    import io
     debug_enabled = config.get('debug_log', False)
 
     if debug_enabled:
@@ -207,13 +195,14 @@ def _setup_logging(config):
             sys.stdout = f
             sys.stderr = f
             print(f"[Debug] === Запуск приложения ===")
+            for line in _startup_diag:
+                print(line)
         except Exception:
             pass
-    elif sys.platform == 'win32' and getattr(sys, 'frozen', False):
-        # Скомпилированная Windows-сборка без отладки — глушим консоль
-        import io
+    else:
+        # Подавляем только stdout — stderr оставляем для реальных ошибок
+        # (ImportError, missing libs, traceback и т.п. будут видны в терминале)
         sys.stdout = io.StringIO()
-        sys.stderr = io.StringIO()
 from config import Config
 from library_window import LibraryWindow
 from reader_window import ReaderWindow
@@ -268,21 +257,21 @@ def _wait_for_previous_instance():
             old_pid = None
 
         if old_pid and old_pid != os.getpid() and _is_process_running(old_pid):
-            print(f"[App] ⏳ Предыдущий экземпляр (PID {old_pid}) ещё работает, ждём...")
+            print(f"[App]  Предыдущий экземпляр (PID {old_pid}) ещё работает, ждём...")
             import time as _time
             deadline = _time.monotonic() + 8.0
             while _time.monotonic() < deadline and _is_process_running(old_pid):
                 _time.sleep(0.25)
             if _is_process_running(old_pid):
-                print(f"[App] ⚠️ Предыдущий экземпляр не завершился за 8 с, продолжаем")
+                print(f"[App]  Предыдущий экземпляр не завершился за 8 с, продолжаем")
             else:
-                print(f"[App] ✅ Предыдущий экземпляр завершился")
+                print(f"[App]  Предыдущий экземпляр завершился")
 
     # Записываем свой PID
     try:
         pid_file.write_text(str(os.getpid()))
     except OSError as e:
-        print(f"[App] ⚠️ Не удалось записать PID-файл: {e}")
+        print(f"[App]  Не удалось записать PID-файл: {e}")
 
 
 def _remove_pid_file():
@@ -336,11 +325,11 @@ def _clear_webengine_cache():
                 shutil.rmtree(target)
                 cleared.append(target.name)
             except Exception as e:
-                print(f"[Cache] ⚠️ Не удалось очистить {target.name}: {e}")
+                print(f"[Cache]  Не удалось очистить {target.name}: {e}")
     if cleared:
-        print(f"[Cache] 🧹 Очищено: {', '.join(cleared)}")
+        print(f"[Cache]  Очищено: {', '.join(cleared)}")
     else:
-        print("[Cache] ✅ Кэш WebEngine чист")
+        print("[Cache]  Кэш WebEngine чист")
 
 
 def _configure_webengine_profile():
@@ -400,7 +389,7 @@ def _configure_webengine_profile():
     except AttributeError:
         pass
 
-    print(f"[Profile] ✅ WebEngine профиль настроен (cache→{cache_dir.name}, storage→tmp)")
+    print(f"[Profile]  WebEngine профиль настроен (cache→{cache_dir.name}, storage→tmp)")
 
 
 
@@ -434,7 +423,7 @@ def _set_app_icon(app):
         app.setWindowIcon(QIcon(str(p)))
         print(f"[App] Иконка: {p.name}")
     else:
-        print("[App] ⚠️ Иконка не найдена")
+        print("[App]  Иконка не найдена")
 
 
 def _load_fonts():
@@ -443,14 +432,14 @@ def _load_fonts():
     else:
         fonts_dir = Path(__file__).parent / 'fonts'
     if not fonts_dir.exists():
-        print(f"[Font] ⚠️ Папка fonts/ не найдена: {fonts_dir}")
+        print(f"[Font]  Папка fonts/ не найдена: {fonts_dir}")
         return
     for ttf in sorted(fonts_dir.glob('*.ttf')):
         fid = QFontDatabase.addApplicationFont(str(ttf))
         if fid >= 0:
-            print(f"[Font] ✅ {ttf.name}: {QFontDatabase.applicationFontFamilies(fid)}")
+            print(f"[Font]  {ttf.name}: {QFontDatabase.applicationFontFamilies(fid)}")
         else:
-            print(f"[Font] ❌ Ошибка загрузки: {ttf.name}")
+            print(f"[Font]  Ошибка загрузки: {ttf.name}")
 
 
 def _make_splash_pixmap(icon_path: Path | None, w: int = 400, h: int = 260) -> QPixmap:
@@ -508,10 +497,111 @@ def _make_splash_pixmap(icon_path: Path | None, w: int = 400, h: int = 260) -> Q
     return px
 
 
+def _build_reader_cmd(book_path: str) -> list:
+    """
+    Возвращает команду для запуска читалки в subprocess.
+
+    Nuitka копирует python3 интерпретатор в dist/ рядом с NovaReader,
+    и sys.executable указывает на него — поэтому нельзя определять режим
+    по имени exe (python3 есть и в source и в compiled).
+
+    Надёжный способ: ищем NovaReader бинарник рядом с sys.executable.
+    Если найден — compiled, запускаем его с --reader.
+    Если нет — source, запускаем интерпретатор + скрипт.
+    """
+    exe_dir = Path(sys.executable).parent
+    for app_name in ('NovaReader', 'NovaReader.exe', 'main', 'main.exe'):
+        app_bin = exe_dir / app_name
+        if app_bin.exists():
+            return [str(app_bin), '--reader', book_path]
+    # Source-режим
+    return [sys.executable, str(Path(__file__).resolve()), '--reader', book_path]
+
+
+class _SubprocessAppInstance:
+    """
+    Заглушка app_instance для ReaderWindow запущенного в --reader режиме.
+    ReaderWindow ожидает объект с reader_windows и show_library().
+    В subprocess библиотека недоступна — show_library() просто закрывает окно.
+    """
+    def __init__(self, window_ref_holder):
+        self._holder = window_ref_holder
+        self.library_window = None
+
+    @property
+    def reader_windows(self):
+        w = self._holder()
+        return [w] if w is not None else []
+
+    def show_library(self):
+        w = self._holder()
+        if w is not None:
+            w.close()
+
+
+def _run_reader_mode(book_path: str):
+    """
+    Режим читалки: запускается когда NovaReader вызван с флагом --reader.
+    Полностью изолированный процесс — при закрытии память освобождается.
+    Chromium-флаги уже выставлены вверху main.py до любых импортов PyQt6.
+    """
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtWebEngineCore import QWebEngineProfile
+
+    if not Path(book_path).exists():
+        print(f"[ReaderMode] Файл не найден: {book_path}")
+        sys.exit(1)
+
+    app = QApplication(sys.argv)
+    app.setApplicationName("NovaReader")
+    _set_app_icon(app)  # иначе Wayland/X11 показывает дефолтный значок
+
+    # Настраиваем WebEngine профиль до создания QWebEngineView
+    profile = QWebEngineProfile.defaultProfile()
+    try:
+        profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
+    except AttributeError:
+        pass
+    profile.setHttpCacheMaximumSize(0)
+    try:
+        profile.setPersistentCookiesPolicy(
+            QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
+    except AttributeError:
+        pass
+
+    from config import Config
+    from reader_window import ReaderWindow
+
+    config = Config()
+
+    _window_ref = [None]
+    app_instance = _SubprocessAppInstance(lambda: _window_ref[0])
+
+    window = ReaderWindow(
+        config,
+        tts_controller=None,
+        parent=None,
+        app_instance=app_instance,
+    )
+    _window_ref[0] = window
+    window.destroyed.connect(lambda: _window_ref.__setitem__(0, None))
+
+    window.load_book(book_path)
+    window.show()
+
+    exit_code = app.exec()
+    _window_ref[0] = None
+    sys.exit(exit_code)
+
+
 class EbookReader:
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setApplicationName("NovaReader")
+        # Отключаем авто-выход при закрытии последнего окна.
+        # Иначе закрытие библиотеки убивает все читалки-subprocess через _on_quit.
+        # Выход управляется вручную через _check_reader_procs и _on_library_closed.
+        self.app.setQuitOnLastWindowClosed(False)
         _load_fonts()
 
         self.config = Config()
@@ -519,8 +609,18 @@ class EbookReader:
         _set_app_icon(self.app)
 
         self.library_window = None
-        self.reader_windows = []
+        self.reader_windows = []   # оставляем для обратной совместимости с closeEvent
+        self._reader_procs: list[tuple[str, subprocess.Popen]] = []
         self._webengine_ready = False
+
+        # Watchdog: каждую секунду проверяем живые subprocess-читалки.
+        # Запускается только после полной инициализации (_initialized=True),
+        # иначе срабатывает до создания library_window и вызывает app.quit().
+        self._initialized = False
+        self._proc_watchdog = QTimer()
+        self._proc_watchdog.setInterval(1000)
+        self._proc_watchdog.timeout.connect(self._check_reader_procs)
+        self._proc_watchdog.start()
 
         # ── Подготовка WebEngine ──────────────────────────────────────────────
         # 0. Ждём завершения предыдущего экземпляра — иначе старый процесс
@@ -591,14 +691,14 @@ class EbookReader:
             # about:blank загружен — Chromium поднят, базовые шейдеры компилируются.
             # Ждём ещё 3 секунды чтобы инициализация завершилась.
             elapsed_blank = int((time.monotonic() - self._warmup_start) * 1000)
-            print(f"[App] ✅ Chromium запущен ({elapsed_blank} мс), ждём 3 с...")
+            print(f"[App]  Chromium запущен ({elapsed_blank} мс), ждём 3 с...")
 
             def _on_ready():
                 if self._webengine_ready:
                     return
                 self._webengine_ready = True
                 elapsed = int((time.monotonic() - self._warmup_start) * 1000)
-                print(f"[App] ✅ WebEngine готов ({elapsed} мс)")
+                print(f"[App]  WebEngine готов ({elapsed} мс)")
                 self._warmup_view.deleteLater()
                 self._warmup_view = None
                 if getattr(self, '_library_pending', False):
@@ -614,7 +714,7 @@ class EbookReader:
         # Жёсткий таймаут 10 с на случай если loadFinished не придёт
         def _timeout():
             if not self._webengine_ready:
-                print("[App] ⚠️ WebEngine warmup timeout — продолжаем")
+                print("[App]  WebEngine warmup timeout — продолжаем")
                 if hasattr(self, '_warmup_view') and self._warmup_view:
                     self._warmup_view.deleteLater()
                     self._warmup_view = None
@@ -624,7 +724,7 @@ class EbookReader:
                     self._finish_show_library()
 
         QTimer.singleShot(10000, _timeout)
-        print("[App] ⏳ Инициализация WebEngine...")
+        print("[App]  Инициализация WebEngine...")
     def _open_library_when_ready(self):
         """Открывает библиотеку: сразу если WebEngine готов, иначе — отложенно."""
         if self._webengine_ready:
@@ -632,14 +732,14 @@ class EbookReader:
         else:
             # Поднимем флаг — _on_ready откроет библиотеку сам
             self._library_pending = True
-            print("[App] 📚 Библиотека отложена — ждём WebEngine…")
+            print("[App]  Библиотека отложена — ждём WebEngine…")
 
     def _finish_show_library(self):
         """Закрывает сплэш и открывает окно библиотеки."""
         if hasattr(self, '_splash') and self._splash:
             self._splash.close()
             self._splash = None
-            print("[App] ✅ Сплэш закрыт")
+            print("[App]  Сплэш закрыт")
         self.show_library()
 
     def _show_wizard(self):
@@ -661,7 +761,7 @@ class EbookReader:
 
     def show_library(self):
         if hasattr(self, '_showing_library') and self._showing_library:
-            print("[App] ⚠️ Защита от рекурсивного show_library()")
+            print("[App]  Защита от рекурсивного show_library()")
             return
         if self.library_window and self.library_window.isVisible():
             print("[App] Библиотека уже открыта")
@@ -674,12 +774,18 @@ class EbookReader:
             if not self.library_window:
                 print("[App] Создаём новое окно библиотеки")
                 self.library_window = LibraryWindow(self.config)
+                # WA_DeleteOnClose: Qt удаляет объект при закрытии окна,
+                # а не просто скрывает. Без этого флага destroyed не срабатывает
+                # и self.library_window остаётся не-None → app никогда не завершается.
+                self.library_window.setAttribute(
+                    Qt.WidgetAttribute.WA_DeleteOnClose, True)
                 self.library_window.book_selected.connect(self.open_book)
                 self.library_window.destroyed.connect(self._on_library_closed)
             else:
                 print("[App] Показываем существующее окно библиотеки")
 
             self.library_window.show()
+            self._initialized = True
             self.library_window.raise_()
             self.library_window.activateWindow()
         finally:
@@ -687,63 +793,95 @@ class EbookReader:
 
     def _on_library_closed(self):
         self.library_window = None
-        if not self.reader_windows:
+        alive = [p for _, p in self._reader_procs if p.poll() is None]
+        if not alive:
             self.app.quit()
 
     def open_book(self, book_path):
         if hasattr(self, '_opening_book') and self._opening_book:
-            print("[App] ⚠️ Защита от рекурсивного open_book()")
+            print("[App]  Защита от рекурсивного open_book()")
             return
 
         self._opening_book = True
         try:
             print(f"[App] Opening book: {book_path}")
 
-            # Если эта книга уже открыта — просто поднимаем её окно
-            for w in list(self.reader_windows):
-                if w.current_book == book_path and w.isVisible():
-                    w.raise_()
-                    w.activateWindow()
-                    print(f"[App] Книга уже открыта, поднимаем окно")
+            # Если эта книга уже открыта в живом subprocess — не запускаем повторно
+            for bp, proc in list(self._reader_procs):
+                if bp == book_path and proc.poll() is None:
+                    print(f"[App] Книга уже открыта в процессе PID={proc.pid}, пропускаем")
                     return
 
+            # Сначала перечитываем positions.json с диска — subprocess мог записать
+            # свежий прогресс после последнего тика watchdog'а (раз в секунду).
+            # Только потом mark_as_read — иначе setdefault создаст пустую запись
+            # и save_positions() сотрёт прогресс ещё до запуска нового subprocess'а.
+            self.config._positions = self.config._load_positions()
             self.config.mark_as_read(book_path)
 
             if self.library_window:
                 self.library_window._on_library_updated()
 
-            # Каждая книга открывается в новом независимом окне
-            # со своим TTSController (создаётся внутри ReaderWindow)
-            print("[App] Создаём новое окно читалки")
-            reader = ReaderWindow(
-                self.config,
-                tts_controller=None,   # окно создаст свой контроллер
-                parent=None,
-                app_instance=self
-            )
-            self.reader_windows.append(reader)
-            reader.destroyed.connect(lambda obj=None, r=reader: self._on_reader_closed(r))
-            reader.load_book(book_path)
-            reader.show()
-            reader.raise_()
-            reader.activateWindow()
+            # Запускаем читалку в отдельном процессе
+            cmd = _build_reader_cmd(book_path)
+            proc = subprocess.Popen(cmd, env=os.environ.copy())
+            self._reader_procs.append((book_path, proc))
+            print(f"[App] Читалка запущена, PID={proc.pid}")
         finally:
             self._opening_book = False
 
-    def _on_reader_closed(self, reader):
-        self.reader_windows = [w for w in self.reader_windows if w is not reader]
-        print(f"[App] Окно читалки закрыто, осталось: {len(self.reader_windows)}")
-        if not self.reader_windows and not self.library_window:
+    def _check_reader_procs(self):
+        """
+        Вызывается каждую секунду. Убирает завершившиеся subprocess'ы.
+        Если библиотека закрыта и читалок не осталось — выходим.
+        """
+        if not self._initialized:
+            return
+        before = len(self._reader_procs)
+        self._reader_procs = [(bp, p) for bp, p in self._reader_procs
+                              if p.poll() is None]
+        finished = before - len(self._reader_procs)
+        if finished:
+            print(f"[App] Читалок завершилось: {finished}, осталось: {len(self._reader_procs)}")
+            # Subprocess записал позицию в positions.json — перечитываем с диска.
+            # Без этого главный процесс показывает устаревший прогресс из памяти.
+            self.config._positions = self.config._load_positions()
+            # Обновляем библиотеку только если она видима — иначе лишний reflow
+            if self.library_window and self.library_window.isVisible():
+                self.library_window._on_library_updated()
+
+        if not self._reader_procs and not self.library_window:
+            print("[App] Все читалки закрыты и библиотека закрыта — выход")
+            self._proc_watchdog.stop()
             self.app.quit()
 
     def run(self):
-        self.app.aboutToQuit.connect(_remove_pid_file)
+        def _on_quit():
+            _remove_pid_file()
+            # Завершаем все живые читалки при закрытии главного процесса
+            for _, proc in self._reader_procs:
+                if proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+
+        self.app.aboutToQuit.connect(_on_quit)
         return self.app.exec()
 
 
 def main():
-    app = EbookReader()
-    sys.exit(app.run())
+    # --reader <book_path> — режим читалки (запускается как subprocess)
+    if '--reader' in sys.argv:
+        idx = sys.argv.index('--reader')
+        if idx + 1 < len(sys.argv):
+            _run_reader_mode(sys.argv[idx + 1])
+        else:
+            print("Использование: NovaReader --reader <book_path>")
+            sys.exit(1)
+    else:
+        app = EbookReader()
+        sys.exit(app.run())
 
 
 if __name__ == "__main__":

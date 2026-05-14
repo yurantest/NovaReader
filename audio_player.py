@@ -79,7 +79,7 @@ class AudioPlayer:
             blocksize=1024,
         )
         self._stream.start()
-        print(f"[AudioPlayer] 🔊 Поток запущен (sr={self.SAMPLE_RATE})")
+        print(f"[AudioPlayer]  Поток запущен (sr={self.SAMPLE_RATE})")
 
     def prepare_sentence(self, on_finished=None):
         """
@@ -105,8 +105,8 @@ class AudioPlayer:
             self._warned_no_callback = False
             self._reset_sentence_counters()
 
-        print(f"[AudioPlayer] 🆕 prepare_sentence gen={self._sentence_generation} "
-              f"callback={'✅' if on_finished else '❌'}")
+        print(f"[AudioPlayer]  prepare_sentence gen={self._sentence_generation} "
+              f"callback={'' if on_finished else ''}")
 
     def stop(self):
         """Остановить и очистить очередь."""
@@ -128,7 +128,7 @@ class AudioPlayer:
             self._stream.close()
             self._stream = None
 
-        print("[AudioPlayer] ⏹ Поток остановлен")
+        print("[AudioPlayer]  Поток остановлен")
 
     def play_chunk(self, audio_data: bytes, is_last=False):
         """
@@ -139,7 +139,7 @@ class AudioPlayer:
             is_last:    True → это последний чанк предложения, после него вызвать callback
         """
         if not self._is_playing or self._stop_flag:
-            print(f"[AudioPlayer] ⚠️ play_chunk отклонён: "
+            print(f"[AudioPlayer]  play_chunk отклонён: "
                   f"is_playing={self._is_playing}, stop_flag={self._stop_flag}")
             return
 
@@ -157,7 +157,7 @@ class AudioPlayer:
             self._current_chunk_size = len(audio_data)
 
         self._queue.put(audio_data)
-        print(f"[AudioPlayer] ⬇️ queued {len(audio_data)} байт "
+        print(f"[AudioPlayer]  queued {len(audio_data)} байт "
               f"is_last={is_last} pending={self._pending_chunks}")
 
     def clear_queue(self):
@@ -167,7 +167,7 @@ class AudioPlayer:
             self._sentence_generation += 1  # отменяем отложенные callback
             self._sentence_callback = None
             self._reset_sentence_counters()
-        print("[AudioPlayer] 🧹 Очередь очищена")
+        print("[AudioPlayer]  Очередь очищена")
 
     # ──────────────────────────────────────────────────────────────────
     # Внутренние методы
@@ -208,7 +208,7 @@ class AudioPlayer:
         НЕ делать тяжёлых операций, НЕ ждать lock долго.
         """
         if status:
-            print(f'[AudioPlayer] ⚠ Status: {status}')
+            print(f'[AudioPlayer]  Status: {status}')
 
         bytes_needed = frames * self.CHANNELS * 2
         buf = bytearray(bytes_needed)
@@ -260,11 +260,11 @@ class AudioPlayer:
                     self._reset_sentence_counters()
                     fire_callback = True
 
-                    print(f"[AudioPlayer] ✅ Предложение завершено "
+                    print(f"[AudioPlayer]  Предложение завершено "
                           f"gen={captured_gen}")
 
                 elif not self._warned_no_callback:
-                    print(f"[AudioPlayer] ⚠ Предложение завершено, callback=None")
+                    print(f"[AudioPlayer]  Предложение завершено, callback=None")
                     self._warned_no_callback = True
                     self._is_last = False
                     self._reset_sentence_counters()
@@ -285,13 +285,13 @@ class AudioPlayer:
                 # Но мы захватили callback ДО сброса — если gen совпадает,
                 # значит никто не вмешался. Если нет — пропускаем.
                 if current_gen != gen:
-                    print(f"[AudioPlayer] ⚠ Callback отменён: "
+                    print(f"[AudioPlayer]  Callback отменён: "
                           f"gen захвачен={gen}, текущий={current_gen}")
                     return
                 try:
                     captured_callback()
                 except Exception as e:
-                    print(f"[AudioPlayer] ❌ Ошибка в callback: {e}")
+                    print(f"[AudioPlayer]  Ошибка в callback: {e}")
 
             threading.Timer(0.15, _fire).start()
 

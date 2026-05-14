@@ -10,6 +10,7 @@ book_normalizer.py — нормализатор книг для корректн
 """
 
 import re
+import sys
 import zipfile
 import shutil
 from pathlib import Path
@@ -28,7 +29,7 @@ def normalize_fb2(src: Path, dst: Path, log: Callable[[str], None] = print) -> b
     4. Нормализует пустые строки и пробелы
     """
     try:
-        log("📖 Читаем FB2...")
+        log(" Читаем FB2...")
         text = src.read_text(encoding='utf-8', errors='replace')
         original_len = len(text)
         changes = 0
@@ -37,7 +38,7 @@ def normalize_fb2(src: Path, dst: Path, log: Callable[[str], None] = print) -> b
         new_text, n = re.subn(r'(</title>)(<(?:p|section|epigraph|subtitle|empty-line))', 
                                r'\1\n\2', text)
         if n:
-            log(f"  ✅ Разделены слипшиеся </title><tag>: {n} случаев")
+            log(f"   Разделены слипшиеся </title><tag>: {n} случаев")
             changes += n
             text = new_text
 
@@ -54,7 +55,7 @@ def normalize_fb2(src: Path, dst: Path, log: Callable[[str], None] = print) -> b
                          if len(re.sub(r'<[^>]+>', '', p).strip()) > 60]
             if not real_body:
                 return m.group(0)
-            log(f"  ✅ Вынесен текст из <title>: {len(real_body)} абзацев")
+            log(f"   Вынесен текст из <title>: {len(real_body)} абзацев")
             changes += len(real_body)
             kept_in_title = [p for p in body_ps if p not in real_body]
             new_title = f"<title>{title_p}{''.join(kept_in_title)}</title>"
@@ -78,19 +79,19 @@ def normalize_fb2(src: Path, dst: Path, log: Callable[[str], None] = print) -> b
             
             # Специальная проверка на "Nota bene" и "С вами был"
             if 'nota bene' in content or 'нота бене' in content:
-                log(f"  🗑️ Удалена секция Nota bene")
+                log(f"   Удалена секция Nota bene")
                 changes += 1
                 return ''
             
             if 'с вами был' in content and ('searchfloor' in content or 'бесплатных книг' in content):
-                log(f"  🗑️ Удалена секция с сайтом searchfloor.org")
+                log(f"   Удалена секция с сайтом searchfloor.org")
                 changes += 1
                 return ''
             
             for phrase in distributor_phrases:
                 if phrase in content:
                     if len(content) < 5000:
-                        log(f"  🗑️ Удалена секция распространителя ({phrase!r})")
+                        log(f"   Удалена секция распространителя ({phrase!r})")
                         changes += 1
                         return ''
             return m.group(0)
@@ -102,15 +103,15 @@ def normalize_fb2(src: Path, dst: Path, log: Callable[[str], None] = print) -> b
         text = re.sub(r'\n{3,}', '\n\n', text)
 
         if changes == 0:
-            log("  ℹ️ Структурных проблем не обнаружено — файл и так корректен")
+            log("  ℹ Структурных проблем не обнаружено — файл и так корректен")
         
-        log(f"  📊 Изменений: {changes}, размер: {original_len} → {len(text)} байт")
+        log(f"   Изменений: {changes}, размер: {original_len} → {len(text)} байт")
         dst.write_text(text, encoding='utf-8')
-        log(f"✅ FB2 сохранён: {dst.name}")
+        log(f" FB2 сохранён: {dst.name}")
         return True
 
     except Exception as e:
-        log(f"❌ Ошибка нормализации FB2: {e}")
+        log(f" Ошибка нормализации FB2: {e}")
         import traceback; traceback.print_exc()
         return False
 
@@ -130,7 +131,7 @@ def normalize_epub(src: Path, dst: Path, log: Callable[[str], None] = print) -> 
     try:
         import zipfile as zf
 
-        log("📖 Читаем EPUB...")
+        log(" Читаем EPUB...")
         shutil.copy2(src, dst)
         
         changes_total = 0
@@ -139,7 +140,7 @@ def normalize_epub(src: Path, dst: Path, log: Callable[[str], None] = print) -> 
             names = z_in.namelist()
             html_files = [n for n in names 
                           if n.lower().endswith(('.html', '.xhtml', '.htm'))]
-            log(f"  📄 Найдено HTML-файлов: {len(html_files)}")
+            log(f"   Найдено HTML-файлов: {len(html_files)}")
 
         # Перезаписываем ZIP с исправленными файлами
         tmp = dst.with_suffix('.tmp.epub')
@@ -154,20 +155,20 @@ def normalize_epub(src: Path, dst: Path, log: Callable[[str], None] = print) -> 
                         changes_total += n
                         data = fixed.encode('utf-8')
                     except Exception as e:
-                        log(f"  ⚠️ Ошибка в {item.filename}: {e}")
+                        log(f"   Ошибка в {item.filename}: {e}")
                 
                 z_out.writestr(item, data)
 
         tmp.replace(dst)
         
         if changes_total == 0:
-            log("  ℹ️ Структурных проблем не обнаружено — файл и так корректен")
+            log("  ℹ Структурных проблем не обнаружено — файл и так корректен")
         
-        log(f"✅ EPUB сохранён: {dst.name} (изменений: {changes_total})")
+        log(f" EPUB сохранён: {dst.name} (изменений: {changes_total})")
         return True
 
     except Exception as e:
-        log(f"❌ Ошибка нормализации EPUB: {e}")
+        log(f" Ошибка нормализации EPUB: {e}")
         import traceback; traceback.print_exc()
         if dst.exists():
             dst.unlink(missing_ok=True)
@@ -195,7 +196,7 @@ def _fix_epub_html(html: str, filename: str, log: Callable) -> tuple[str, int]:
         if not real_body:
             return m.group(0)
         
-        log(f"    ✅ {filename}: вынесен текст из <{tag}>: {len(real_body)} абзацев")
+        log(f"     {filename}: вынесен текст из <{tag}>: {len(real_body)} абзацев")
         changes += len(real_body)
         heading = f"<{tag}{attrs}>{inner_clean}</{tag}>"
         return heading + '\n' + '\n'.join(real_body)
@@ -220,19 +221,19 @@ def _fix_epub_html(html: str, filename: str, log: Callable) -> tuple[str, int]:
         
         # Специальная проверка на "Nota bene"
         if 'nota bene' in content or 'нота бене' in content:
-            log(f"    🗑️ {filename}: удалена секция Nota bene")
+            log(f"     {filename}: удалена секция Nota bene")
             changes += 1
             return ''
         
         if 'с вами был' in content and ('searchfloor' in content or 'бесплатных книг' in content):
-            log(f"    🗑️ {filename}: удалена секция с сайтом searchfloor.org")
+            log(f"     {filename}: удалена секция с сайтом searchfloor.org")
             changes += 1
             return ''
         
         for phrase in distributor_phrases:
             if phrase in content:
                 if len(content) < 5000:
-                    log(f"    🗑️ {filename}: удалена секция распространителя ({phrase!r})")
+                    log(f"     {filename}: удалена секция распространителя ({phrase!r})")
                     changes += 1
                     return ''
         return m.group(0)
@@ -254,11 +255,11 @@ def normalize_mobi(src: Path, dst: Path, log: Callable[[str], None] = print) -> 
     затем применяет нормализацию EPUB.
     """
     try:
-        log("📖 MOBI: пробуем извлечь через mobi...")
+        log(" MOBI: пробуем извлечь через mobi...")
         try:
             import mobi
         except ImportError:
-            log("  ⚠️ Библиотека mobi не установлена. Устанавливаем...")
+            log("   Библиотека mobi не установлена. Устанавливаем...")
             import subprocess, sys
             subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'mobi', '--quiet'])
             import mobi
@@ -267,7 +268,7 @@ def normalize_mobi(src: Path, dst: Path, log: Callable[[str], None] = print) -> 
         import os
         
         with tempfile.TemporaryDirectory() as tmp_dir:
-            log("  📦 Извлекаем MOBI...")
+            log("   Извлекаем MOBI...")
             
             # Пробуем разные способы вызова mobi.extract
             result_dir = None
@@ -283,7 +284,7 @@ def normalize_mobi(src: Path, dst: Path, log: Callable[[str], None] = print) -> 
                     result_dir = mobi.extract(str(src), output_dir=tmp_dir)
             
             if not result_dir:
-                log("  ❌ Не удалось извлечь MOBI")
+                log("   Не удалось извлечь MOBI")
                 return False
             
             result_path = Path(result_dir)
@@ -292,23 +293,23 @@ def normalize_mobi(src: Path, dst: Path, log: Callable[[str], None] = print) -> 
             epub_files = list(result_path.rglob('*.epub'))
             if epub_files:
                 epub_src = epub_files[0]
-                log(f"  ✅ Найден EPUB внутри MOBI: {epub_src.name}")
+                log(f"   Найден EPUB внутри MOBI: {epub_src.name}")
                 epub_dst = dst.with_suffix('.epub')
                 return normalize_epub(epub_src, epub_dst, log)
             
             # Если EPUB нет — ищем HTML
             html_files = list(result_path.rglob('*.html')) + list(result_path.rglob('*.htm'))
             if html_files:
-                log(f"  📄 Найдено HTML файлов: {len(html_files)}, собираем EPUB...")
+                log(f"   Найдено HTML файлов: {len(html_files)}, собираем EPUB...")
                 epub_dst = dst.with_suffix('.epub')
                 _pack_html_to_epub(html_files, result_path, epub_dst, log)
                 return normalize_epub(epub_dst, epub_dst, log)
             
-            log("  ❌ Не удалось извлечь содержимое MOBI")
+            log("   Не удалось извлечь содержимое MOBI")
             return False
 
     except Exception as e:
-        log(f"❌ Ошибка нормализации MOBI: {e}")
+        log(f" Ошибка нормализации MOBI: {e}")
         import traceback; traceback.print_exc()
         return False
 
@@ -338,7 +339,7 @@ def _pack_html_to_epub(html_files: list, base_dir: Path, dst: Path, log: Callabl
 <spine>{''.join(spine_items)}</spine>
 </package>'''
         z.writestr('OEBPS/content.opf', opf)
-    log(f"  📦 Упакован EPUB: {dst.name}")
+    log(f"   Упакован EPUB: {dst.name}")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -359,16 +360,16 @@ def normalize_book(src_path: str, dst_path: str,
     dst = Path(dst_path)
 
     if not src.exists():
-        log(f"❌ Файл не найден: {src}")
+        log(f" Файл не найден: {src}")
         return False
 
     ext = src.suffix.lower()
 
     if ext not in SUPPORTED:
-        log(f"❌ Формат {ext} не поддерживается (только FB2, EPUB, MOBI, AZW3)")
+        log(f" Формат {ext} не поддерживается (только FB2, EPUB, MOBI, AZW3)")
         return False
 
-    log(f"🔧 Нормализация: {src.name}")
+    log(f" Нормализация: {src.name}")
     log(f"   Формат: {ext.upper()}")
     log(f"   Сохранение: {dst}")
     log("─" * 50)
@@ -381,3 +382,510 @@ def normalize_book(src_path: str, dst_path: str,
         return normalize_mobi(src, dst, log)
 
     return False
+
+# ──────────────────────────────────────────────────────────────
+# КОНВЕРТАЦИЯ
+# ──────────────────────────────────────────────────────────────
+
+CONVERT_FORMATS = ['epub', 'fb2', 'mobi', 'azw3', 'txt', 'pdf']
+
+def _find_calibre() -> str | None:
+    """Возвращает путь к ebook-convert Calibre или None."""
+    import shutil
+    candidates = ['ebook-convert']
+    if sys.platform == 'win32':
+        candidates += [
+            r'C:\Program Files\Calibre2\ebook-convert.exe',
+            r'C:\Program Files (x86)\Calibre2\ebook-convert.exe',
+        ]
+    elif sys.platform == 'darwin':
+        candidates += ['/Applications/calibre.app/Contents/MacOS/ebook-convert']
+    else:
+        candidates += ['/usr/bin/ebook-convert', '/usr/local/bin/ebook-convert',
+                       '/opt/calibre/ebook-convert']
+    for c in candidates:
+        found = shutil.which(c) or (Path(c).exists() and c)
+        if found:
+            return str(found)
+    return None
+
+
+def _find_fb2c() -> Path | None:
+    """
+    Ищет бинарник fb2c в папке tools/fb2c/ рядом с программой.
+    Оба бинарника лежат в одной папке — программа сама выбирает нужный:
+        tools/fb2c/fb2c          (Linux)
+        tools/fb2c/fb2c.exe      (Windows)
+    """
+    import stat as _stat
+    base = Path(__file__).parent
+    fb2c_dir = base / 'tools' / 'fb2c'
+
+    binary = fb2c_dir / ('fb2c.exe' if sys.platform == 'win32' else 'fb2c')
+    if binary.exists():
+        if sys.platform != 'win32':
+            try:
+                binary.chmod(binary.stat().st_mode | _stat.S_IEXEC)
+            except Exception:
+                pass
+        return binary
+    return None
+
+
+def convert_fb2_to_epub(src: Path, dst: Path,
+                        log: Callable[[str], None] = print,
+                        stop_flag: list | None = None) -> bool:
+    """
+    Встроенный конвертер FB2 -> EPUB.
+    Нулевые зависимости — только стандартная библиотека Python.
+    Работает на любом Python 3.8+.
+    """
+    import re, zipfile, base64, html as _html, uuid
+    from xml.etree import ElementTree as ET
+
+    FBns  = 'http://www.gribuser.ru/xml/fictionbook/2.0'
+    XLns  = 'http://www.w3.org/1999/xlink'
+    NL    = '\n'
+
+    def fb(tag):
+        return '{' + FBns + '}' + tag
+
+    def xl(tag):
+        return '{' + XLns + '}' + tag
+
+    def get_text(el, tag):
+        child = el.find(fb(tag)) if el is not None else None
+        return (child.text or '').strip() if child is not None else ''
+
+    def esc(s):
+        return _html.escape(s or '')
+
+    def inner_html(el):
+        """Сериализует текст и дочерние элементы в HTML."""
+        TAG = {
+            fb('strong'):      'strong',
+            fb('emphasis'):    'em',
+            fb('strikethrough'): 's',
+            fb('sub'):         'sub',
+            fb('sup'):         'sup',
+            fb('code'):        'code',
+        }
+        parts = [esc(el.text or '')]
+        for child in el:
+            ctag = child.tag
+            if ctag == fb('image'):
+                href = child.get(xl('href'), '')
+                alt  = esc(child.get('alt', ''))
+                if href.startswith('#'):
+                    src = href[1:]
+                    parts.append('<img src="images/' + src + '" alt="' + alt + '"/>')
+            elif ctag == fb('a'):
+                href = child.get(xl('href'), '')
+                parts.append('<a href="' + esc(href) + '">' + inner_html(child) + '</a>')
+            elif ctag in TAG:
+                t = TAG[ctag]
+                parts.append('<' + t + '>' + inner_html(child) + '</' + t + '>')
+            else:
+                parts.append(inner_html(child))
+            parts.append(esc(child.tail or ''))
+        return ''.join(parts)
+
+    def section_to_html(sec, depth=0):
+        parts = []
+        sec_id = sec.get('id', '')
+        for child in sec:
+            ctag = child.tag
+            if ctag == fb('title'):
+                level = min(depth + 2, 5)
+                h = 'h' + str(level)
+                t_id = child.get('id', '')
+                id_attr = ' id="' + esc(t_id) + '"' if t_id else ''
+                parts.append('<' + h + id_attr + '>' + inner_html(child) + '</' + h + '>')
+            elif ctag == fb('p'):
+                p_id = child.get('id', '')
+                id_attr = ' id="' + esc(p_id) + '"' if p_id else ''
+                parts.append('<p' + id_attr + '>' + inner_html(child) + '</p>')
+            elif ctag == fb('empty-line'):
+                parts.append('<p class="empty-line"> </p>')
+            elif ctag == fb('image'):
+                href = child.get(xl('href'), '')
+                alt  = esc(child.get('alt', ''))
+                if href.startswith('#'):
+                    src = href[1:]
+                    parts.append('<img src="images/' + src + '" alt="' + alt + '"/>')
+            elif ctag == fb('epigraph'):
+                parts.append('<blockquote class="epigraph">' + inner_html(child) + '</blockquote>')
+            elif ctag == fb('cite'):
+                parts.append('<blockquote>' + inner_html(child) + '</blockquote>')
+            elif ctag == fb('subtitle'):
+                parts.append('<h3>' + inner_html(child) + '</h3>')
+            elif ctag == fb('poem'):
+                poem_parts = ['<div class="poem">']
+                for pc in child:
+                    if pc.tag == fb('stanza'):
+                        poem_parts.append('<div class="stanza">')
+                        for v in pc.findall(fb('v')):
+                            poem_parts.append('<p class="verse-line">' + inner_html(v) + '</p>')
+                        poem_parts.append('</div>')
+                    elif pc.tag == fb('title'):
+                        poem_parts.append('<h4>' + inner_html(pc) + '</h4>')
+                    elif pc.tag == fb('text-author'):
+                        poem_parts.append('<p class="text-author">' + inner_html(pc) + '</p>')
+                poem_parts.append('</div>')
+                parts.append(''.join(poem_parts))
+            elif ctag == fb('section'):
+                parts.append(section_to_html(child, depth + 1))
+            elif ctag == fb('table'):
+                rows = []
+                for row in child.findall(fb('tr')):
+                    cells = []
+                    for cell in row:
+                        ct = 'th' if cell.tag == fb('th') else 'td'
+                        cells.append('<' + ct + '>' + inner_html(cell) + '</' + ct + '>')
+                    rows.append('<tr>' + ''.join(cells) + '</tr>')
+                parts.append('<table>' + ''.join(rows) + '</table>')
+            elif ctag == fb('annotation'):
+                parts.append('<aside>' + inner_html(child) + '</aside>')
+
+        id_attr = ' id="' + esc(sec_id) + '"' if sec_id else ''
+        return '<section' + id_attr + '>' + NL + NL.join(parts) + NL + '</section>'
+
+    CSS = (
+        'body{font-family:serif;margin:1em 2em;line-height:1.6}' + NL +
+        'h1,h2,h3,h4,h5{text-align:center;margin:1em 0 .5em}' + NL +
+        'p{text-indent:1em;margin:0}' + NL +
+        'p.empty-line{text-indent:0;margin:.5em 0}' + NL +
+        '.poem{margin:1em 2em}.stanza{margin-bottom:.5em}' + NL +
+        'p.verse-line{text-indent:0;margin:0}' + NL +
+        'p.text-author{text-align:right;font-style:italic}' + NL +
+        'blockquote{margin:1em 2em;border-left:3px solid #ccc;padding-left:1em}' + NL +
+        'img{max-width:100%;display:block;margin:1em auto}' + NL +
+        'table{border-collapse:collapse;width:100%}' + NL +
+        'td,th{border:1px solid #ccc;padding:.3em .5em}' + NL
+    )
+
+    def make_xhtml(body_content, doc_title, lang):
+        return (
+            '<?xml version="1.0" encoding="utf-8"?>' + NL +
+            '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="' + lang + '">' + NL +
+            '<head><meta charset="utf-8"/>' + NL +
+            '<title>' + esc(doc_title) + '</title>' + NL +
+            '<link rel="stylesheet" type="text/css" href="../styles/main.css"/>' + NL +
+            '</head>' + NL +
+            '<body>' + NL + body_content + NL + '</body>' + NL + '</html>' + NL
+        )
+
+    try:
+        log(' Читаем FB2 (' + str(src.stat().st_size // 1024) + ' КБ)...')
+
+        raw = src.read_bytes()
+        # Убираем нулевые байты если есть
+        if b'\x00' in raw:
+            raw = raw.replace(b'\x00', b'')
+
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError as e:
+            log('  XML ошибка: ' + str(e) + ', пробуем восстановить...')
+            # Убираем невалидные XML-символы
+            raw = re.sub(rb'[\x01-\x08\x0b\x0c\x0e-\x1f]', b'', raw)
+            root = ET.fromstring(raw)
+
+        log('    XML разобран')
+        if stop_flag and stop_flag[0]:
+            return False
+
+        ti    = root.find('.//' + fb('title-info'))
+        title = get_text(ti, 'book-title') if ti else src.stem
+        lang  = get_text(ti, 'lang') if ti else 'ru'
+        if not lang:
+            lang = 'ru'
+        book_uuid = str(uuid.uuid4())
+
+        authors = []
+        if ti:
+            for a in ti.findall(fb('author')):
+                parts = [get_text(a, x) for x in ('first-name', 'middle-name', 'last-name')]
+                name = ' '.join(p for p in parts if p)
+                if name:
+                    authors.append(name)
+        author_str = ', '.join(authors) or 'Unknown'
+        log('    ' + title + ' / ' + author_str)
+
+        # Изображения
+        images = {}
+        for binary in root.findall('.//' + fb('binary')):
+            img_id  = binary.get('id', '')
+            ctype   = binary.get('content-type', 'image/jpeg')
+            b64data = (binary.text or '').replace('\n', '').replace(' ', '')
+            if img_id and b64data:
+                try:
+                    images[img_id] = (ctype, base64.b64decode(b64data))
+                except Exception:
+                    pass
+        log('     Изображений: ' + str(len(images)))
+
+        if stop_flag and stop_flag[0]:
+            return False
+
+        # Обложка
+        cover_id = None
+        cov_el = root.find('.//' + fb('coverpage') + '/' + fb('image'))
+        if cov_el is None:
+            cov_el = root.find('.//' + fb('coverpage') + '//' + fb('image'))
+        if cov_el is not None:
+            href = cov_el.get(xl('href'), '')
+            if href.startswith('#'):
+                cover_id = href[1:]
+
+        # Секции
+        chapters = []
+        bodies = root.findall('.//' + fb('body'))
+        for bi, body in enumerate(bodies):
+            is_notes = body.get('name', '') == 'notes'
+            sections = body.findall(fb('section'))
+            for si, sec in enumerate(sections):
+                if stop_flag and stop_flag[0]:
+                    return False
+                title_el = sec.find(fb('title'))
+                if title_el is not None:
+                    sec_title = re.sub(r'<[^>]+>', '', inner_html(title_el)).strip()
+                    sec_title = re.sub(r'\s+', ' ', sec_title)
+                else:
+                    sec_title = 'Примечания' if is_notes else ('Глава ' + str(si + 1))
+                fname    = 'chapter_' + str(bi).zfill(2) + '_' + str(si).zfill(4) + '.xhtml'
+                body_html = section_to_html(sec)
+                xhtml    = make_xhtml(body_html, sec_title or title, lang)
+                chapters.append((fname, sec_title, xhtml, is_notes))
+                if (si + 1) % 20 == 0:
+                    log('    Секций: ' + str(si + 1) + '/' + str(len(sections)))
+
+        log('    Секций: ' + str(len(chapters)))
+        if stop_flag and stop_flag[0]:
+            return False
+
+        # Пишем EPUB
+        log('    Упаковываем EPUB...')
+        with zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(zipfile.ZipInfo('mimetype'),
+                        b'application/epub+zip', compress_type=zipfile.ZIP_STORED)
+            zf.writestr('META-INF/container.xml', (
+                '<?xml version="1.0"?>' + NL +
+                '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">' + NL +
+                '<rootfiles>' + NL +
+                '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>' + NL +
+                '</rootfiles>' + NL + '</container>' + NL
+            ))
+            zf.writestr('OEBPS/styles/main.css', CSS)
+
+            for img_id, (ctype, data) in images.items():
+                zf.writestr('OEBPS/images/' + img_id, data)
+
+            for fname, ch_title, xhtml, _ in chapters:
+                zf.writestr('OEBPS/Text/' + fname, xhtml.encode('utf-8'))
+
+            manifest = ['<item id="css" href="styles/main.css" media-type="text/css"/>']
+            spine    = []
+            for img_id, (ctype, _) in images.items():
+                props = ' properties="cover-image"' if img_id == cover_id else ''
+                manifest.append(
+                    '<item id="img_' + img_id + '" href="images/' + img_id + '" '
+                    'media-type="' + ctype + '"' + props + '/>')
+            for i, (fname, _, _, is_notes) in enumerate(chapters):
+                iid = 'ch' + str(i).zfill(4)
+                lin = ' linear="no"' if is_notes else ''
+                manifest.append('<item id="' + iid + '" href="Text/' + fname +
+                                '" media-type="application/xhtml+xml"/>')
+                spine.append('<itemref idref="' + iid + '"' + lin + '/>')
+
+            toc_items = []
+            play_order = 1
+            for i, (fname, ch_title, _, is_notes) in enumerate(chapters):
+                if not is_notes and ch_title:
+                    toc_items.append(
+                        '<navPoint id="nav' + str(i) + '" playOrder="' + str(play_order) + '">' + NL +
+                        '<navLabel><text>' + esc(ch_title[:80]) + '</text></navLabel>' + NL +
+                        '<content src="Text/' + fname + '"/>' + NL + '</navPoint>')
+                    play_order += 1
+
+            cover_meta = ('<meta name="cover" content="img_' + cover_id + '"/>' if cover_id else '')
+            opf = (
+                '<?xml version="1.0" encoding="utf-8"?>' + NL +
+                '<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">' + NL +
+                '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">' + NL +
+                '<dc:title>' + esc(title) + '</dc:title>' + NL +
+                '<dc:creator>' + esc(author_str) + '</dc:creator>' + NL +
+                '<dc:language>' + lang + '</dc:language>' + NL +
+                '<dc:identifier id="BookId">urn:uuid:' + book_uuid + '</dc:identifier>' + NL +
+                cover_meta + NL +
+                '</metadata>' + NL +
+                '<manifest>' + NL + NL.join(manifest) + NL +
+                '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>' + NL +
+                '</manifest>' + NL +
+                '<spine toc="ncx">' + NL + NL.join(spine) + NL + '</spine>' + NL +
+                '</package>' + NL
+            )
+            zf.writestr('OEBPS/content.opf', opf.encode('utf-8'))
+
+            ncx = (
+                '<?xml version="1.0" encoding="utf-8"?>' + NL +
+                '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">' + NL +
+                '<head><meta name="dtb:uid" content="urn:uuid:' + book_uuid + '"/></head>' + NL +
+                '<docTitle><text>' + esc(title) + '</text></docTitle>' + NL +
+                '<navMap>' + NL + NL.join(toc_items) + NL + '</navMap>' + NL +
+                '</ncx>' + NL
+            )
+            zf.writestr('OEBPS/toc.ncx', ncx.encode('utf-8'))
+
+        size_kb = dst.stat().st_size // 1024
+        log(' EPUB сохранён: ' + dst.name + ' (' + str(size_kb) + ' КБ)')
+        return True
+
+    except Exception as e:
+        log(' Ошибка конвертации FB2→EPUB: ' + str(e))
+        import traceback; traceback.print_exc()
+        if dst.exists():
+            dst.unlink(missing_ok=True)
+        return False
+
+
+def convert_book_fb2c(src: Path, dst_dir: Path,
+                      out_fmt: str = 'epub',
+                      log: Callable[[str], None] = print,
+                      stop_flag: list | None = None) -> Path | None:
+    """
+    Конвертирует FB2 через fb2c (rupor-github/fb2c).
+    Бинарник должен лежать в tools/fb2c/fb2c(.exe).
+
+    Команда: fb2c convert --nodirs --to epub <src.fb2> <tmp_dir/>
+    fb2c пишет во временную папку (ext4/tmpfs) — там нет ограничений NTFS.
+    После конвертации файл переименовывается (_safe_name) и перемещается в dst_dir.
+    Возвращает Path к результирующему файлу или None при ошибке.
+    """
+    import subprocess, tempfile, shutil, re as _re, unicodedata as _ud, os
+
+    fb2c = _find_fb2c()
+    if not fb2c:
+        log(" fb2c не найден.")
+        log("   Скачайте бинарник: https://github.com/rupor-github/fb2c/releases")
+        log("   Положите в папку: tools/fb2c/fb2c (Linux) или tools/fb2c/fb2c.exe (Windows)")
+        return None
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    log(f" fb2c: {src.name} → {out_fmt.upper()}")
+
+    def _safe_filename(name: str, max_len: int = 180) -> str:
+        """Очистить имя файла от символов, недопустимых на NTFS."""
+        name = "".join(ch for ch in name
+                       if _ud.category(ch) not in ("Cc", "Cf") and ord(ch) >= 0x20)
+        FORBIDDEN = set('<>:"/\\|?*\'&;=+,[]{|}^%@!~`')
+        name = "".join("_" if ch in FORBIDDEN else ch for ch in name)
+        name = _re.sub(r'_+', '_', name)
+        name = _re.sub(r' +', ' ', name)
+        name = name.strip(". ")
+        return name[:max_len] or "book"
+
+    # Конфиг fb2c хранится в папке конфигурации NovaReader:
+    #   Linux:   ~/.config/NovaReader/fb2c.yaml
+    #   Windows: %APPDATA%/NovaReader/fb2c.yaml
+    if sys.platform == 'win32':
+        _base = Path(os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming'))
+    else:
+        _base = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
+    cfg_path = _base / 'NovaReader' / 'novareader.yaml'
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not cfg_path.exists():
+        cfg_path.write_text(
+            "document:\n"
+            "  output_name_template: |\n"
+            "    {{- with first .Authors -}}{{- .LastName -}}"
+            " - {{- end -}}{{- .Title -}}\n",
+            encoding="utf-8")
+        log(f"   Создан конфиг: {cfg_path}")
+
+    # Конвертируем во временную папку.
+    # Linux/Mac: /tmp — ext4/tmpfs, любые символы допустимы.
+    # Windows: fb2c сам не добавляет кавычки благодаря конфигу.
+    # _safe_filename дополнительно чистит результат для NTFS3.
+    with tempfile.TemporaryDirectory(prefix="novareader_fb2c_") as tmp_str:
+        tmp_dir = Path(tmp_str)
+        tmp_out = tmp_dir / "out"
+        tmp_out.mkdir()
+
+        cmd = [
+            str(fb2c),
+            '--config', str(cfg_path),
+            'convert',
+            '--nodirs',
+            '--ow',
+            '--to', out_fmt,
+            str(src),
+            str(tmp_out),
+        ]
+
+        try:
+            kwargs = {}
+            if sys.platform == 'win32':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                **kwargs,
+            )
+
+            last_status = ''
+            for line in proc.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                if line != last_status:
+                    log(f"   {line}")
+                    last_status = line
+                if stop_flag and stop_flag[0]:
+                    proc.terminate()
+                    log(" Отменено")
+                    return None
+
+            proc.wait()
+
+            if proc.returncode != 0:
+                log(f" fb2c вернул код {proc.returncode}")
+                return None
+
+            # Ищем созданный файл в папке вывода
+            ext = '.' + out_fmt
+            results = list(tmp_out.glob(f'*{ext}'))
+            if not results:
+                log(f" Результат не найден во временной папке")
+                return None
+
+            tmp_result = max(results, key=lambda p: p.stat().st_mtime)
+
+            # Очищаем имя файла от символов, запрещённых NTFS3
+            clean_stem = _safe_filename(tmp_result.stem)
+            clean_name = clean_stem + tmp_result.suffix
+            final_path = dst_dir / clean_name
+
+            # Если имя изменилось — сообщаем
+            if clean_name != tmp_result.name:
+                log(f"   Имя очищено: {tmp_result.name!r} → {clean_name!r}")
+
+            # Перемещаем из tmp (ext4) в dst_dir (может быть NTFS)
+            shutil.move(str(tmp_result), str(final_path))
+
+            size_kb = final_path.stat().st_size // 1024
+            log(f" Готово: {final_path.name} ({size_kb} КБ)")
+            return final_path
+
+        except subprocess.TimeoutExpired:
+            log(" Таймаут")
+            return None
+        except Exception as e:
+            log(f" Ошибка: {e}")
+            return None
+
+

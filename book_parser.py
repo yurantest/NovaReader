@@ -315,6 +315,52 @@ class BookParser:
                         imgs.sort()
                         return zf.read(imgs[0])
 
+            elif ext == '.cbr':
+                # CBR: распаковываем RAR и берём первое/cover изображение
+                IMG = ('.jpg', '.jpeg', '.png', '.gif', '.webp')
+                try:
+                    import rarfile as _rf
+                    with _rf.RarFile(file_path) as rf:
+                        names = sorted(rf.namelist())
+                        covers = [n for n in names
+                                  if 'cover' in n.lower().split('/')[-1]
+                                  and n.lower().endswith(IMG)]
+                        imgs = covers or [n for n in names if n.lower().endswith(IMG)]
+                        if imgs:
+                            with rf.open(imgs[0]) as f:
+                                return f.read()
+                except ImportError:
+                    pass
+                except Exception as e:
+                    print(f"[Parser] CBR cover rarfile error: {e}")
+                # Fallback через системный unrar/bsdtar/7z
+                try:
+                    import subprocess, tempfile
+                    tmp = tempfile.mkdtemp(prefix="nr_cbr_")
+                    try:
+                        for cmd in (
+                            ["unrar", "x", "-y", file_path, tmp + "/"],
+                            ["bsdtar", "-xf", file_path, "-C", tmp],
+                            ["7z", "x", file_path, f"-o{tmp}", "-y"],
+                        ):
+                            try:
+                                r = subprocess.run(cmd, capture_output=True, timeout=30)
+                                if r.returncode == 0:
+                                    break
+                            except (FileNotFoundError, subprocess.TimeoutExpired):
+                                continue
+                        imgs = sorted([
+                            f for f in Path(tmp).rglob("*")
+                            if f.suffix.lower() in IMG and f.is_file()
+                        ])
+                        if imgs:
+                            return imgs[0].read_bytes()
+                    finally:
+                        import shutil
+                        shutil.rmtree(tmp, ignore_errors=True)
+                except Exception as e:
+                    print(f"[Parser] CBR cover subprocess error: {e}")
+
             elif ext == '.mobi' or ext == '.azw3':
                 # MOBI: пытаемся извлечь обложку через mobi-библиотеку или как первое изображение
                 try:

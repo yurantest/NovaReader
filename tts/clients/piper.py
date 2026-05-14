@@ -297,9 +297,9 @@ class PiperClient(TTSClient):
             try:
                 callback()
             except Exception as e:
-                print(f"[Piper] ❌ Ошибка в callback: {e}")
+                print(f"[Piper]  Ошибка в callback: {e}")
         else:
-            print("[Piper] ⚠ callback=None (предложение уже завершено)")
+            print("[Piper]  callback=None (предложение уже завершено)")
 
     def _finish(self):
         """Завершение при ошибке/отмене — вызывает callback если он ещё есть."""

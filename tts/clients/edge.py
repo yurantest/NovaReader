@@ -54,7 +54,7 @@ class EdgeClient(TTSClient):
         if self._available:
             # Не запускаем event loop сразу — только при первом вызове speak()
             # Это экономит ~5 MB и один фоновый поток если Edge никогда не используется
-            print("[EdgeTTS] ✅ Edge TTS готов к работе (event loop запустится при первом использовании)")
+            print("[EdgeTTS]  Edge TTS готов к работе (event loop запустится при первом использовании)")
 
     def _start_event_loop(self):
         self._loop = asyncio.new_event_loop()
@@ -65,7 +65,7 @@ class EdgeClient(TTSClient):
         """Запустить asyncio event loop при первом реальном использовании."""
         if self._loop is None:
             self._start_event_loop()
-            print("[EdgeTTS] 🔁 Event loop запущен (lazy init)")
+            print("[EdgeTTS]  Event loop запущен (lazy init)")
 
     def _run_loop(self):
         asyncio.set_event_loop(self._loop)
@@ -81,7 +81,7 @@ class EdgeClient(TTSClient):
         self._finished_called = False
 
         if not self._available:
-            print("[EdgeTTS] ❌ Edge TTS не доступен")
+            print("[EdgeTTS]  Edge TTS не доступен")
             if callback:
                 threading.Timer(0.1, callback).start()
             return False
@@ -127,7 +127,7 @@ class EdgeClient(TTSClient):
             chunk_count = 0
             async for chunk in communicate.stream():
                 if self._stop_flag:
-                    print("[EdgeTTS] ⚠️ Прервано")
+                    print("[EdgeTTS]  Прервано")
                     return
                 if chunk["type"] == "audio":
                     mp3_data += chunk["data"]
@@ -136,7 +136,7 @@ class EdgeClient(TTSClient):
             print(f"[EdgeTTS] MP3: {chunk_count} чанков, {len(mp3_data)} байт")
 
             if not mp3_data:
-                print("[EdgeTTS] ⚠️ Нет аудио данных → _on_audio_finished")
+                print("[EdgeTTS]  Нет аудио данных → _on_audio_finished")
                 self._on_audio_finished()
                 return
 
@@ -155,18 +155,18 @@ class EdgeClient(TTSClient):
             print(f"[EdgeTTS] PCM: {len(pcm_data)} байт")
 
             if self._stop_flag:
-                print("[EdgeTTS] ⚠️ Прервано после декодирования")
+                print("[EdgeTTS]  Прервано после декодирования")
                 return
 
             if pcm_data and len(pcm_data) > 0:
                 player.play_chunk(pcm_data, is_last=True)
                 print("[EdgeTTS] Ждём callback из AudioPlayer...")
             else:
-                print("[EdgeTTS] ⚠️ PCM пуст → _on_audio_finished")
+                print("[EdgeTTS]  PCM пуст → _on_audio_finished")
                 self._on_audio_finished()
 
         except Exception as e:
-            print(f"[EdgeTTS] ❌ Ошибка: {e}")
+            print(f"[EdgeTTS]  Ошибка: {e}")
             import traceback
             traceback.print_exc()
             self._on_audio_finished()
@@ -230,7 +230,7 @@ class EdgeClient(TTSClient):
         Раньше ещё вызывался _finish() → on_finish_callback → двойной ttsNext.
         """
         if self._finished_called:
-            print("[EdgeTTS] ⚠ _on_audio_finished уже вызывался, игнорируем")
+            print("[EdgeTTS]  _on_audio_finished уже вызывался, игнорируем")
             return
 
         self._finished_called = True
@@ -247,9 +247,9 @@ class EdgeClient(TTSClient):
             try:
                 callback()
             except Exception as e:
-                print(f"[EdgeTTS] ❌ Ошибка в callback: {e}")
+                print(f"[EdgeTTS]  Ошибка в callback: {e}")
         else:
-            print("[EdgeTTS] ⚠ callback=None (предложение уже завершено)")
+            print("[EdgeTTS]  callback=None (предложение уже завершено)")
 
     def stop(self):
         """Немедленная остановка."""

@@ -1,143 +1,211 @@
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QRadioButton, QFileDialog,
-                             QGroupBox, QButtonGroup, QMessageBox)
+                             QGroupBox, QButtonGroup, QStackedWidget, QWidget)
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from pathlib import Path
 
 
 class WelcomeWizard(QDialog):
-    """Окно приветствия при первом запуске"""
+    """Окно приветствия при первом запуске.
+    Страница 0 — выбор языка.
+    Страница 1 — выбор папки библиотеки.
+    """
 
     setup_completed = pyqtSignal(str)
+
+    # Все строки в двух языках прямо здесь
+    _STRINGS = {
+        'ru': {
+            'window_title':   'Добро пожаловать',
+            'title':          ' Добро пожаловать!',
+            'desc':           'Похоже, вы запускаете приложение впервые.\nДавайте настроим вашу библиотеку.',
+            'lang_group':     'Язык интерфейса',
+            'folder_group':   'Папка для хранения книг',
+            'default_radio':  'Использовать папку по умолчанию',
+            'custom_radio':   'Выбрать другую папку',
+            'choose_btn':     ' Выбрать папку…',
+            'choose_dialog':  'Выберите папку для библиотеки',
+            'cancel':         'Отмена',
+            'next':           'Далее →',
+            'finish':         'Готово',
+        },
+        'en': {
+            'window_title':   'Welcome',
+            'title':          ' Welcome!',
+            'desc':           'Looks like you are launching the app for the first time.\nLet\'s set up your library.',
+            'lang_group':     'Interface language',
+            'folder_group':   'Books library folder',
+            'default_radio':  'Use default folder',
+            'custom_radio':   'Choose another folder',
+            'choose_btn':     ' Choose folder…',
+            'choose_dialog':  'Select library folder',
+            'cancel':         'Cancel',
+            'next':           'Next →',
+            'finish':         'Done',
+        },
+    }
 
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self._lang = config.get('language', 'ru')
+
         from config import Config
         self.selected_path = str(Config._get_default_library_dir())
 
-        self.setWindowTitle("Добро пожаловать")
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(520)
         self.setModal(True)
+        self._build_ui()
+        self._apply()
 
-        self._setup_ui()
+    def _s(self, key: str) -> str:
+        return self._STRINGS.get(self._lang, self._STRINGS['ru']).get(key, key)
 
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(20)
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setSpacing(20)
 
-        # Заголовок
-        title = QLabel("📚 Добро пожаловать!")
-        title_font = QFont()
-        title_font.setPointSize(18)
-        title_font.setBold(True)
-        title.setFont(title_font)
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        self._stack = QStackedWidget()
+        outer.addWidget(self._stack)
 
-        # Описание
-        desc = QLabel(
-            "Похоже, вы запускаете приложение впервые.\n"
-            "Давайте настроим вашу библиотеку."
-        )
-        desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        desc.setStyleSheet("color: #666; margin-bottom: 20px;")
-        layout.addWidget(desc)
+        self._stack.addWidget(self._build_page_lang())
+        self._stack.addWidget(self._build_page_folder())
 
-        # Группа выбора папки
-        folder_group = QGroupBox("Папка для хранения книг")
-        folder_layout = QVBoxLayout(folder_group)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
 
-        # Вариант 1: Папка по умолчанию
-        self.default_radio = QRadioButton("Использовать папку по умолчанию")
+        self.cancel_btn = QPushButton()
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self.cancel_btn)
+
+        self.next_btn = QPushButton()
+        self.next_btn.setStyleSheet(
+            "QPushButton{background:#1a73e8;color:white;border:none;"
+            "padding:8px 16px;border-radius:4px;font-weight:bold;}"
+            "QPushButton:hover{background:#1765cc;}")
+        self.next_btn.clicked.connect(self._on_next)
+        btn_row.addWidget(self.next_btn)
+
+        outer.addLayout(btn_row)
+
+    def _build_page_lang(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(16)
+
+        self._title_lbl = QLabel()
+        f = QFont(); f.setPointSize(18); f.setBold(True)
+        self._title_lbl.setFont(f)
+        self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._title_lbl)
+
+        self._desc_lbl = QLabel()
+        self._desc_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._desc_lbl.setStyleSheet("color:#666;")
+        self._desc_lbl.setWordWrap(True)
+        lay.addWidget(self._desc_lbl)
+
+        self._lang_group = QGroupBox()
+        g_lay = QVBoxLayout(self._lang_group)
+        bg = QButtonGroup(self)
+
+        self._rb_ru = QRadioButton('Русский')
+        self._rb_en = QRadioButton('English')
+        self._rb_ru.setChecked(self._lang == 'ru')
+        self._rb_en.setChecked(self._lang == 'en')
+        self._rb_ru.toggled.connect(lambda on: self._on_lang('ru') if on else None)
+        self._rb_en.toggled.connect(lambda on: self._on_lang('en') if on else None)
+        bg.addButton(self._rb_ru)
+        bg.addButton(self._rb_en)
+        g_lay.addWidget(self._rb_ru)
+        g_lay.addWidget(self._rb_en)
+        lay.addWidget(self._lang_group)
+        lay.addStretch()
+        return page
+
+    def _build_page_folder(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(16)
+
+        self._folder_group = QGroupBox()
+        f_lay = QVBoxLayout(self._folder_group)
+
+        self.default_radio = QRadioButton()
         self.default_radio.setChecked(True)
-        self.default_radio.toggled.connect(self._on_radio_toggled)
-        folder_layout.addWidget(self.default_radio)
+        self.default_radio.toggled.connect(self._on_folder_toggle)
+        f_lay.addWidget(self.default_radio)
 
         from config import Config
-        _def_lib = Config._get_default_library_dir()
-        default_path_label = QLabel(str(_def_lib))
-        default_path_label.setStyleSheet("color: #1a73e8; font-family: monospace; margin-left: 20px;")
-        folder_layout.addWidget(default_path_label)
+        self._def_path_lbl = QLabel(str(Config._get_default_library_dir()))
+        self._def_path_lbl.setStyleSheet("color:#1a73e8;font-family:monospace;margin-left:20px;")
+        f_lay.addWidget(self._def_path_lbl)
 
-        # Вариант 2: Выбрать другую папку
-        self.custom_radio = QRadioButton("Выбрать другую папку")
-        self.custom_radio.toggled.connect(self._on_radio_toggled)
-        folder_layout.addWidget(self.custom_radio)
+        self.custom_radio = QRadioButton()
+        self.custom_radio.toggled.connect(self._on_folder_toggle)
+        f_lay.addWidget(self.custom_radio)
 
-        # Кнопка выбора папки (изначально скрыта)
-        self.choose_folder_btn = QPushButton("📁 Выбрать папку...")
-        self.choose_folder_btn.setVisible(False)
-        self.choose_folder_btn.clicked.connect(self._choose_folder)
-        folder_layout.addWidget(self.choose_folder_btn)
+        self.choose_btn = QPushButton()
+        self.choose_btn.setVisible(False)
+        self.choose_btn.clicked.connect(self._choose_folder)
+        f_lay.addWidget(self.choose_btn)
 
-        # Метка с выбранным путем
-        self.selected_path_label = QLabel("")
-        self.selected_path_label.setStyleSheet("color: #1a73e8; font-family: monospace; margin-left: 20px;")
-        self.selected_path_label.setVisible(False)
-        folder_layout.addWidget(self.selected_path_label)
+        self.chosen_lbl = QLabel()
+        self.chosen_lbl.setStyleSheet("color:#1a73e8;font-family:monospace;margin-left:20px;")
+        self.chosen_lbl.setVisible(False)
+        f_lay.addWidget(self.chosen_lbl)
 
-        layout.addWidget(folder_group)
+        lay.addWidget(self._folder_group)
+        lay.addStretch()
+        return page
 
-        # Кнопки
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
+    def _apply(self):
+        """Применяет все строки по текущему языку."""
+        self.setWindowTitle(self._s('window_title'))
+        self._title_lbl.setText(self._s('title'))
+        self._desc_lbl.setText(self._s('desc'))
+        self._lang_group.setTitle(self._s('lang_group'))
+        self._folder_group.setTitle(self._s('folder_group'))
+        self.default_radio.setText(self._s('default_radio'))
+        self.custom_radio.setText(self._s('custom_radio'))
+        self.choose_btn.setText(self._s('choose_btn'))
+        self.cancel_btn.setText(self._s('cancel'))
+        cur = self._stack.currentIndex()
+        self.next_btn.setText(self._s('finish') if cur == 1 else self._s('next'))
 
-        self.cancel_btn = QPushButton("Отмена")
-        self.cancel_btn.clicked.connect(self.reject)
-        button_layout.addWidget(self.cancel_btn)
+    def _on_lang(self, code: str):
+        self._lang = code
+        self.config.set('language', code)
+        self._apply()
 
-        self.next_btn = QPushButton("Далее →")
-        self.next_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1a73e8;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #1765cc;
-            }
-        """)
-        self.next_btn.clicked.connect(self._on_next)
-        button_layout.addWidget(self.next_btn)
-
-        layout.addLayout(button_layout)
-
-    def _on_radio_toggled(self):
+    def _on_folder_toggle(self):
         if self.default_radio.isChecked():
             from config import Config
             self.selected_path = str(Config._get_default_library_dir())
-            self.choose_folder_btn.setVisible(False)
-            self.selected_path_label.setVisible(False)
+            self.choose_btn.setVisible(False)
+            self.chosen_lbl.setVisible(False)
         else:
-            self.choose_folder_btn.setVisible(True)
+            self.choose_btn.setVisible(True)
             if self.selected_path:
-                self.selected_path_label.setText(self.selected_path)
-                self.selected_path_label.setVisible(True)
+                self.chosen_lbl.setText(self.selected_path)
+                self.chosen_lbl.setVisible(True)
 
     def _choose_folder(self):
         folder = QFileDialog.getExistingDirectory(
-            self,
-            "Выберите папку для библиотеки",
-            str(Path.home())
-        )
-
+            self, self._s('choose_dialog'), str(Path.home()))
         if folder:
             self.selected_path = folder
-            self.selected_path_label.setText(folder)
-            self.selected_path_label.setVisible(True)
+            self.chosen_lbl.setText(folder)
+            self.chosen_lbl.setVisible(True)
 
     def _on_next(self):
-        # Сохраняем настройки
+        if self._stack.currentIndex() == 0:
+            self._stack.setCurrentIndex(1)
+            self._apply()
+            return
         self.config.set('library_path', self.selected_path)
         self.config.set('first_run', False)
-
-        # Создаем папку если её нет
         Path(self.selected_path).mkdir(parents=True, exist_ok=True)
-
         self.setup_completed.emit(self.selected_path)
         self.accept()

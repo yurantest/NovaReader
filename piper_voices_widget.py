@@ -65,7 +65,7 @@ class PiperVoicesWidget(QWidget):
         title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         layout.addWidget(title)
         
-        hint = QLabel("Нажмите ⬇️ для загрузки голоса. После загрузки голос станет доступен в читалке.")
+        hint = QLabel("Нажмите  для загрузки голоса. После загрузки голос станет доступен в читалке.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #9aa0a6; font-size: 11px;")
         layout.addWidget(hint)
@@ -142,7 +142,7 @@ class PiperVoicesWidget(QWidget):
         info_layout = QVBoxLayout()
         
         name_label = QLabel(f"<b>{voice_name}</b>")
-        name_label.setStyleSheet("color: #e8eaed; font-size: 14px;")
+        name_label.setStyleSheet("font-size: 14px;")  # цвет из палитры — читается на любой теме
         info_layout.addWidget(name_label)
         
         quality_label = QLabel(f"Качество: <span style='color: #7ecfff;'>{quality}</span>")
@@ -157,7 +157,7 @@ class PiperVoicesWidget(QWidget):
         
         if installed:
             # Голос установлен
-            status_label = QLabel("✅ Установлен")
+            status_label = QLabel(" Установлен")
             status_label.setStyleSheet("color: #4caf50; font-size: 12px; font-weight: bold;")
             status_layout.addWidget(status_label)
         else:
@@ -165,7 +165,7 @@ class PiperVoicesWidget(QWidget):
             btn_layout = QHBoxLayout()
             btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             
-            download_btn = QPushButton("⬇️ Загрузить")
+            download_btn = QPushButton(" Загрузить")
             download_btn.setStyleSheet("""
                 QPushButton {
                     background: #1a73e8;
@@ -239,7 +239,7 @@ class PiperVoicesWidget(QWidget):
         btn = self._find_download_button(voice_id)
         if btn:
             btn.setEnabled(False)
-            btn.setText("⏳ Загрузка...")
+            btn.setText(" Загрузка...")
         
         # Показываем прогресс
         progress_bar.show()
@@ -261,7 +261,7 @@ class PiperVoicesWidget(QWidget):
             if item and item.widget():
                 widget = item.widget()
                 btn = widget.findChild(QPushButton)
-                if btn and btn.text() in ["⬇️ Загрузить", "⏳ Загрузка..."]:
+                if btn and btn.text() in [" Загрузить", " Загрузка..."]:
                     return btn
         return None
     
@@ -286,7 +286,7 @@ class PiperVoicesWidget(QWidget):
             self.voicesChanged.emit()  # Уведомляем об изменении
         else:
             if btn:
-                btn.setText("⬇️ Загрузить")
+                btn.setText(" Загрузить")
                 btn.setEnabled(True)
     
     def get_installed_voices(self):

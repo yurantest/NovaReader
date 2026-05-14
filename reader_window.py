@@ -115,6 +115,11 @@ class ReaderBridge(QObject):
         })
 
     @pyqtSlot(result=str)
+    def getLanguage(self):
+        """Возвращает язык интерфейса: 'ru' или 'en'."""
+        return self._config.get('language', 'ru')
+
+    @pyqtSlot(result=str)
     def getAvailableEngines(self):
         tts = self._tts
         if not tts:
@@ -191,6 +196,12 @@ class ReaderBridge(QObject):
     def showSettings(self):
         from settings_window import SettingsWindow
         self.settings_window = SettingsWindow(self._config, self.reader)
+        # Подключаем колбэки чтобы изменения в настройках экрана
+        # применялись сразу без перезапуска
+        self.settings_window._screen_inhibit_changed_cb = \
+            lambda enabled: self.reader._apply_screen_inhibit()
+        self.settings_window._screen_timeout_changed_cb = \
+            lambda minutes: self.reader._apply_screen_inhibit()
         self.settings_window.show()
 
     @pyqtSlot()
@@ -201,17 +212,18 @@ class ReaderBridge(QObject):
 
     @pyqtSlot(str, float)
     def savePosition(self, position_json, progress):
+        """Сохранить позицию для текущего формата книги."""
         if not (self._r and self._r.current_book):
             return
         try:
             position = json.loads(position_json)
-        except:
+        except Exception:
             position = {'section': 0}
         self._config.update_progress(self._r.current_book, progress, position)
-        print(f"[Reader] Позиция сохранена: секция={position.get('section')}, прогресс={progress:.1%}")
 
     @pyqtSlot(result=str)
     def getPosition(self):
+        """Вернуть позицию для текущего формата книги."""
         if not (self._r and self._r.current_book):
             return json.dumps(None)
         bookmark = self._config.get_bookmark(self._r.current_book)
@@ -338,6 +350,54 @@ class ReaderBridge(QObject):
         self._config.remove_highlight(self._r.current_book, highlight_id)
         print(f"[Reader] Подсветка удалена: {highlight_id}")
 
+    # ── Заметки ───────────────────────────────────────────────────────────
+    @pyqtSlot(str, str, str)
+    def saveNote(self, highlight_id, note_text, cfi_json):
+        """Сохранить заметку, привязанную к выделению (highlight_id) или позиции (cfi)."""
+        if not (self._r and self._r.current_book):
+            return
+        try:
+            note = {
+                'id':           str(uuid.uuid4()),
+                'highlight_id': highlight_id,   # '' если заметка без выделения
+                'text':         note_text,
+                'cfi':          cfi_json,
+                'timestamp':    datetime.now().isoformat(),
+            }
+            self._config.add_note(self._r.current_book, note)
+            print(f"[Reader] Заметка сохранена: {note['id'][:8]}…")
+        except Exception as e:
+            print(f"[Reader] saveNote error: {e}")
+
+    @pyqtSlot(result=str)
+    def getNotes(self):
+        """Вернуть все заметки текущей книги как JSON."""
+        if not (self._r and self._r.current_book):
+            return json.dumps([])
+        return json.dumps(self._config.get_notes(self._r.current_book))
+
+    @pyqtSlot(str)
+    def removeNote(self, note_id):
+        """Удалить заметку по ID."""
+        if self._r and self._r.current_book:
+            self._config.remove_note(self._r.current_book, note_id)
+            print(f"[Reader] Заметка удалена: {note_id}")
+
+    @pyqtSlot(str, str)
+    def updateNote(self, note_id, new_text):
+        """Обновить текст существующей заметки."""
+        if not (self._r and self._r.current_book):
+            return
+        notes = self._config.get_notes(self._r.current_book)
+        for n in notes:
+            if n.get('id') == note_id:
+                n['text'] = new_text
+                n['edited'] = datetime.now().isoformat()
+                break
+        self._config._notes[self._r.current_book] = notes
+        self._config.save_notes()
+        print(f"[Reader] Заметка обновлена: {note_id}")
+
     @pyqtSlot(str)
     def saveQuoteImage(self, base64_data):
         try:
@@ -459,6 +519,13 @@ class ReaderWindow(QMainWindow):
         self.settings_window = None
         self._closing = False  # защита от повторного closeEvent
 
+        # Подавление гашения экрана (кофеин-режим)
+        from screen_inhibit import ScreenInhibitor
+        self._screen_inhibitor = ScreenInhibitor()
+        self._screen_timeout_timer = QTimer(self)
+        self._screen_timeout_timer.setSingleShot(True)
+        self._screen_timeout_timer.timeout.connect(self._on_screen_timeout)
+
         # Каждое окно читалки владеет собственным TTSController.
         # Это позволяет открывать несколько книг одновременно без конфликтов.
         if tts_controller is not None:
@@ -474,6 +541,8 @@ class ReaderWindow(QMainWindow):
         self._setup_ui()
         self._setup_webchannel()
         self._setup_shortcuts()
+        # Применяем настройку экрана при старте
+        self._apply_screen_inhibit()
 
     def _setup_ui(self):
         central = QWidget()
@@ -520,10 +589,10 @@ class ReaderWindow(QMainWindow):
             base = Path(__file__).parent
         html_path = base / 'web' / 'reader.html'
         if html_path.exists():
-            print(f"[Reader] ✅ HTML: {html_path}")
+            print(f"[Reader]  HTML: {html_path}")
             self.web_view.setUrl(QUrl.fromLocalFile(str(html_path)))
         else:
-            print(f"[Reader] ❌ reader.html не найден: {html_path}")
+            print(f"[Reader]  reader.html не найден: {html_path}")
 
     def _setup_webchannel(self):
         self.bridge = ReaderBridge(self)
@@ -592,7 +661,36 @@ class ReaderWindow(QMainWindow):
         """
         self.web_view.page().runJavaScript(js)
 
+    def _apply_screen_inhibit(self):
+        """Применяет настройку подавления гашения экрана из конфига."""
+        enabled = self.config.get('screen_inhibit', False)
+        timeout_min = self.config.get('screen_inhibit_timeout', 0)
+        print(f'[ScreenInhibit] _apply: enabled={enabled} timeout={timeout_min}min')
+        self._screen_timeout_timer.stop()
+        if enabled:
+            ok = self._screen_inhibitor.inhibit()
+            print(f'[ScreenInhibit] inhibit() → {"OK" if ok else "FAILED"}')
+            if ok and timeout_min > 0:
+                self._screen_timeout_timer.start(timeout_min * 60 * 1000)
+                print(f'[ScreenInhibit] Таймер запущен: {timeout_min} мин')
+        else:
+            self._screen_inhibitor.uninhibit()
+            print('[ScreenInhibit] uninhibit (отключено в настройках)')
+
+    def _on_screen_timeout(self):
+        """Срабатывает по истечении таймера — снимаем запрет."""
+        print('[ScreenInhibit] Таймер истёк — разрешаем гашение экрана')
+        self._screen_inhibitor.uninhibit()
+
     def load_book(self, book_path):
+        self._apply_screen_inhibit()
+        # Вызываем book.destroy() перед сменой книги — освобождает blob URLs
+        # и позволяет GC собрать старую книгу (особенно важно для FB2).
+        if self.current_book and self.page_loaded:
+            self.web_view.page().runJavaScript(
+                "if (window._currentBook && typeof window._currentBook.destroy === 'function')"
+                " { window._currentBook.destroy(); window._currentBook = null; }"
+            )
         self.current_book = book_path
         self.setWindowTitle("NovaReader")
         self._tts_data_pushed = False
@@ -688,6 +786,13 @@ class ReaderWindow(QMainWindow):
             event.accept()
             return
         self._closing = True
+
+        # Снимаем запрет гашения экрана при закрытии
+        try:
+            self._screen_timeout_timer.stop()
+            self._screen_inhibitor.uninhibit()
+        except Exception:
+            pass
 
         # Страховочная очистка IndexedDB-кэша FB2 перед закрытием
         try:
