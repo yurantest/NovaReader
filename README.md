@@ -43,21 +43,19 @@
 
 | Платформа | Ссылка | Размер |
 |-----------|--------|--------|
-| **Windows** | [NovaReader_Windows_v1.0.zip](#) | ~450 МБ |
-| **Linux** | [NovaReader_Linux_v1.0.tar.gz](#) | ~460 МБ |
+| **Windows** | NovaReader.exe | ~450 МБ |
+| **Linux** | NovaReader_Linux.tar.gz| ~460 МБ |
 
 ---
 
 ## 🚀 Установка и запуск
 
 ### Windows
-1. Скачайте `NovaReader_Windows_v1.0.zip`
-2. Распакуйте в любую папку
-3. Запустите `NovaReader.exe`
+1. Скачайте `NovaReader.exe`
 
 ### Linux
-1. Скачайте `NovaReader_Linux_v1.0.tar.gz`
-2. Распакуйте: `tar -xzf NovaReader_Linux_v1.0.tar.gz`
+1. Скачайте `NovaReader_Linux.tar.gz`
+2. Распакуйте: `tar -xzf NovaReader_Linux.tar.gz`
 3. Запустите: `./NovaReader`
 
 ---
