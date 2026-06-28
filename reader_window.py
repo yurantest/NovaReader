@@ -1,6 +1,6 @@
-from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QApplication
-from PyQt6.QtCore import QUrl, pyqtSlot, QObject, pyqtSignal, QTimer, Qt
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QApplication, QGraphicsOpacityEffect
+from PyQt6.QtCore import QUrl, pyqtSlot, QObject, pyqtSignal, QTimer, Qt, QPropertyAnimation, QEasingCurve, QRectF
+from PyQt6.QtGui import QKeySequence, QShortcut, QPainter, QColor, QPen, QFont
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings, QWebEngineProfile
 from PyQt6.QtWebChannel import QWebChannel
@@ -74,6 +74,30 @@ class ReaderBridge(QObject):
     def onSectionChanged(self, index):
         print(f"[Reader] Секция: {index}")
 
+    @pyqtSlot()
+    def onBookReady(self):
+        """JS сообщает что книга готова — скрываем оверлей, показываем web_view."""
+        self.reader.web_view.setVisible(True)
+        if hasattr(self.reader, '_loading_overlay'):
+            self.reader._loading_overlay.fadeOut()
+        # Запускаем очистку памяти с задержкой 4с — даём WebEngine
+        # завершить все внутренние инициализации, после чего возвращаем
+        # незадействованные страницы ОС через malloc_trim.
+        QTimer.singleShot(4000, self._trim_process_memory)
+
+    @staticmethod
+    def _trim_process_memory():
+        """Возвращает свободные арены glibc ядру (Linux).
+        Эквивалент того, что ОС делает при memory pressure —
+        но принудительно, сразу после полной загрузки книги."""
+        try:
+            import ctypes
+            libc = ctypes.CDLL('libc.so.6', use_errno=True)
+            result = libc.malloc_trim(0)
+            print(f'[Memory] malloc_trim(0) -> {result} (1=OK, страницы возвращены ОС)')
+        except Exception as e:
+            print(f'[Memory] malloc_trim недоступен: {e}')
+
     @pyqtSlot(result=str)
     def getBookData(self):
         if not (self._r and self._r.current_book):
@@ -93,9 +117,9 @@ class ReaderBridge(QObject):
             # Выигрыш по памяти для 15 МБ FB2:
             #   base64-путь: ~20 МБ Python + ~20 МБ JS + ~15 МБ Uint8Array = ~55 МБ пиковых
             #   file://-путь: ~15 МБ ArrayBuffer = ~15 МБ пиковых
-            file_url = book_path.as_uri()  # → file:///path/to/book.fb2 (кроссплатформенно)
+            file_url = book_path.as_uri()
             mb = book_path.stat().st_size / 1024 / 1024
-            print(f"[Bridge] {book_type.upper()} {mb:.1f} МБ → file://, передаём URL в JS")
+            print(f"[Bridge] {book_type.upper()} {mb:.1f} MB -> file://, passing URL to JS")
 
             return json.dumps({
                 'type':     book_type,
@@ -156,6 +180,14 @@ class ReaderBridge(QObject):
         tts = self._tts
         if tts and text:
             print(f"[Reader] onTTSText: {text[:50]}...")
+            # Устанавливаем duration_callback ДО speak() — клиент сбрасывает его
+            # при каждом новом speak(), поэтому ставим сразу перед вызовом.
+            if hasattr(tts.active_client, '_duration_callback'):
+                def _send_duration(ms):
+                    if self.reader is not None:
+                        js = f"window._ttsDurationMs && window._ttsDurationMs({ms});"
+                        self.reader.web_view.page().runJavaScript(js)
+                tts.active_client._duration_callback = _send_duration
             tts.speak(text, self._on_tts_finished)
         else:
             print(f"[Reader] onTTSText: окно закрывается, игнорируем")
@@ -189,19 +221,34 @@ class ReaderBridge(QObject):
         print(f"[Reader] Текст скопирован в буфер: {text[:50]}...")
 
     @pyqtSlot()
+    def onMouseMove(self):
+        """Вызывается из JS при движении мыши — сбрасываем таймер скрытия курсора."""
+        if self._r:
+            self._r._show_cursor()
+
+    @pyqtSlot()
     def showLibrary(self):
         if self._r: self._r.show_library()
 
     @pyqtSlot()
     def showSettings(self):
         from settings_window import SettingsWindow
+        # Убеждаемся что web_view видим — иначе Qt зависнет показывая диалог
+        self.reader.web_view.setVisible(True)
         self.settings_window = SettingsWindow(self._config, self.reader)
+        self.settings_window.finished.connect(lambda: self._config.save())
         # Подключаем колбэки чтобы изменения в настройках экрана
         # применялись сразу без перезапуска
         self.settings_window._screen_inhibit_changed_cb = \
             lambda enabled: self.reader._apply_screen_inhibit()
         self.settings_window._screen_timeout_changed_cb = \
             lambda minutes: self.reader._apply_screen_inhibit()
+        self.settings_window._cursor_autohide_changed_cb = \
+            lambda enabled: self.reader._apply_cursor_autohide()
+        # Обновляем кнопку отладки при смене режима разработчика
+        self.settings_window._dev_mode_changed_cb = \
+            lambda enabled: self.reader.web_view.page().runJavaScript(
+                f'if(window.setDevMode) window.setDevMode({"true" if enabled else "false"})')
         self.settings_window.show()
 
     @pyqtSlot()
@@ -287,9 +334,17 @@ class ReaderBridge(QObject):
                 'ru_RU_irina_medium'
             ),
             'tts_highlight_color': tts_color,
+            'reader_font_family': self._config.get('reader_font_family', self._config.DEFAULT_FONT),
+            'font_faces': self._config.get_font_file_map(),
+            'fonts_base_url': self._config.get_fonts_base_url(),
         }
         result = json.dumps(settings)
         print(f"[Reader] Настройки отправлены в JS: стиль={highlight_style}, TTS цвет={tts_color}")
+        # Применяем режим разработчика — показываем/скрываем кнопку отладки
+        dev_mode = self._config.get('debug_log', False)
+        if self._r and self._r.web_view:
+            js = f'if(window.setDevMode) window.setDevMode({"true" if dev_mode else "false"});'
+            self._r.web_view.page().runJavaScript(js)
         return result
 
     @pyqtSlot(str)
@@ -300,6 +355,12 @@ class ReaderBridge(QObject):
             value = data.get('value')
             if key:
                 self._config.set(key, value)
+                if key == 'theme_bg' and value:
+                    self.setStyleSheet(f"QMainWindow {{ background: {value}; }}")
+                    from PyQt6.QtGui import QColor
+                    self.web_view.page().setBackgroundColor(QColor(value))
+                    if hasattr(self, '_loading_overlay'):
+                        self._loading_overlay.set_bg_color(value)
                 print(f"[Reader] Настройка сохранена: {key}={value}")
         except Exception as e:
             print(f"[Reader] Ошибка сохранения настройки: {e}")
@@ -508,6 +569,103 @@ class ReaderBridge(QObject):
         return LABELS.get(key, key)
 
 
+class _LoadingOverlay(QWidget):
+    """Оверлей поверх QMainWindow с анимацией загрузки.
+    Рисуется на уровне Qt — не зависит от Chromium."""
+
+    def __init__(self, parent, bg_color: str = '#f4ecd8'):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._bg = QColor(bg_color)
+        self._angle = 0
+        self._book_name = ''
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)  # ~60 fps
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+        self.raise_()
+
+    def set_book_name(self, name: str):
+        self._book_name = name
+        self.update()
+
+    def set_bg_color(self, color: str):
+        self._bg = QColor(color)
+        self.update()
+
+    def _tick(self):
+        self._angle = (self._angle + 4) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Фон
+        p.fillRect(self.rect(), self._bg)
+
+        cx, cy = self.width() / 2, self.height() / 2
+        is_dark = self._bg.lightness() < 128
+        text_color = QColor('#e0e0e0') if is_dark else QColor('#5b4636')
+        sub_color  = QColor('#888888')
+        spin_bg    = QColor(120, 120, 120, 40)
+        spin_fg    = QColor('#6c5ce7')
+
+        # Название книги
+        if self._book_name:
+            # Метка ЗАГРУЗКА
+            lbl_font = QFont()
+            lbl_font.setPointSize(9)
+            lbl_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 3)
+            p.setFont(lbl_font)
+            p.setPen(sub_color)
+            p.drawText(self.rect().adjusted(0, 0, 0, -120),
+                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                       'ЗАГРУЗКА')
+
+            # Название
+            name_font = QFont()
+            name_font.setPointSize(16)
+            name_font.setBold(True)
+            p.setFont(name_font)
+            p.setPen(text_color)
+            name_rect = self.rect().adjusted(40, 40, -40, -40)
+            p.drawText(name_rect,
+                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                       self._book_name)
+
+        # Спиннер
+        r = 18
+        pen_w = 3
+        spinner_rect = QRectF(cx - r, cy + 40, r * 2, r * 2)
+
+        # Фоновое кольцо
+        pen = QPen(spin_bg, pen_w)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.drawEllipse(spinner_rect)
+
+        # Дуга
+        pen2 = QPen(spin_fg, pen_w)
+        pen2.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen2)
+        p.drawArc(spinner_rect, int(-self._angle * 16), 100 * 16)
+
+        p.end()
+
+    def fadeOut(self):
+        self._timer.stop()
+        # QPropertyAnimation на windowOpacity не работает для дочерних виджетов.
+        # Используем простое скрытие через таймер чтобы не зависала анимация.
+        self.hide()
+
+    def forceHide(self):
+        """Немедленно скрыть без анимации — вызывается из closeEvent."""
+        self._timer.stop()
+        self.hide()
+
+
 class ReaderWindow(QMainWindow):
     def __init__(self, config, tts_controller=None, parent=None, app_instance=None):
         super().__init__(parent)
@@ -526,6 +684,13 @@ class ReaderWindow(QMainWindow):
         self._screen_timeout_timer.setSingleShot(True)
         self._screen_timeout_timer.timeout.connect(self._on_screen_timeout)
 
+        # Автоскрытие курсора мыши при бездействии
+        self._cursor_hidden = False
+        self._cursor_hide_timer = QTimer(self)
+        self._cursor_hide_timer.setSingleShot(True)
+        self._cursor_hide_timer.timeout.connect(self._hide_cursor)
+        self._cursor_hide_delay = 3000  # 3 секунды бездействия
+
         # Каждое окно читалки владеет собственным TTSController.
         # Это позволяет открывать несколько книг одновременно без конфликтов.
         if tts_controller is not None:
@@ -537,12 +702,28 @@ class ReaderWindow(QMainWindow):
             self.tts_controller = TTSController(config)
             self._owns_tts = True
 
+        self.setMinimumSize(800, 600)
+        # Красим фон самого окна под тему — иначе при максимизации Qt
+        # показывает системный фон в области ещё не отрисованной Chromium
+        theme_bg = config.get('theme_bg', '#f4ecd8')
+        self.setStyleSheet(f"QMainWindow {{ background: {theme_bg}; }}")
+        # Восстанавливаем размер для случая когда пользователь снял максимизацию
+        self.resize(config.get('reader_width', 1280), config.get('reader_height', 800))
         self.showMaximized()
         self._setup_ui()
         self._setup_webchannel()
         self._setup_shortcuts()
+
+        # Qt-оверлей поверх окна — виден пока web_view скрыт
+        theme_bg = config.get('theme_bg', '#f4ecd8')
+        self._loading_overlay = _LoadingOverlay(self, theme_bg)
+        self._loading_overlay.setGeometry(self.rect())
+        self._loading_overlay.show()
         # Применяем настройку экрана при старте
         self._apply_screen_inhibit()
+        # Перехватываем события мыши на web_view для автоскрытия курсора
+        self.web_view.setMouseTracking(True)
+        self.web_view.installEventFilter(self)
 
     def _setup_ui(self):
         central = QWidget()
@@ -551,6 +732,7 @@ class ReaderWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.web_view = QWebEngineView()
+
         settings = self.web_view.settings()
         # Включаем только необходимое
         settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
@@ -587,7 +769,7 @@ class ReaderWindow(QMainWindow):
             base = Path(sys._MEIPASS)
         else:
             base = Path(__file__).parent
-        html_path = base / 'web' / 'reader.html'
+        html_path = base / 'ibc' / 'reader.html'
         if html_path.exists():
             print(f"[Reader]  HTML: {html_path}")
             self.web_view.setUrl(QUrl.fromLocalFile(str(html_path)))
@@ -601,14 +783,23 @@ class ReaderWindow(QMainWindow):
         self.channel.registerObject('readerBridge', self.bridge)
         self.web_view.page().setWebChannel(self.channel)
         self.web_view.loadFinished.connect(self._on_page_loaded)
+        # Прячем виджет до полной загрузки книги — убирает flash
+        self.web_view.setVisible(False)
+        # Красим фон Chromium под тему — убирает белый flash до первого paint
+        from PyQt6.QtGui import QColor
+        theme_bg = self.config.get('theme_bg', '#f4ecd8')
+        self.web_view.page().setBackgroundColor(QColor(theme_bg))
 
     def _on_tts_finished(self):
-        print("[Reader] TTS finished → вызываем window.ttsNext()")
+        print("[Reader] TTS finished -> вызываем window.ttsNext()")
         self.web_view.page().runJavaScript("window.ttsNext && window.ttsNext();")
 
     def _on_page_loaded(self, ok):
         if ok:
             self.page_loaded = True
+            # Показываем web_view сразу — статический баннер в HTML уже виден,
+            # книга появится плавно через CSS когда будет готова
+            self.web_view.setVisible(True)
             if self.current_book:
                 QTimer.singleShot(500, self._load_book)
             if not self._tts_data_pushed:
@@ -652,6 +843,11 @@ class ReaderWindow(QMainWindow):
         return LABELS.get(key, key)
 
     def _load_book(self):
+        # Показываем название книги в оверлее
+        if hasattr(self, '_loading_overlay') and self.current_book:
+            import os
+            name = os.path.splitext(os.path.basename(str(self.current_book)))[0]
+            self._loading_overlay.set_book_name(name)
         js = """
         if (window.bridge && window.loadBook) {
             window.bridge.getBookData(function(data) {
@@ -669,7 +865,7 @@ class ReaderWindow(QMainWindow):
         self._screen_timeout_timer.stop()
         if enabled:
             ok = self._screen_inhibitor.inhibit()
-            print(f'[ScreenInhibit] inhibit() → {"OK" if ok else "FAILED"}')
+            print(f'[ScreenInhibit] inhibit() -> {"OK" if ok else "FAILED"}')
             if ok and timeout_min > 0:
                 self._screen_timeout_timer.start(timeout_min * 60 * 1000)
                 print(f'[ScreenInhibit] Таймер запущен: {timeout_min} мин')
@@ -682,8 +878,49 @@ class ReaderWindow(QMainWindow):
         print('[ScreenInhibit] Таймер истёк — разрешаем гашение экрана')
         self._screen_inhibitor.uninhibit()
 
+    def _apply_cursor_autohide(self):
+        """Применяет настройку автоскрытия курсора из конфига."""
+        enabled = self.config.get('cursor_autohide', True)
+        if enabled:
+            self._cursor_hide_timer.start(self._cursor_hide_delay)
+        else:
+            self._cursor_hide_timer.stop()
+            self._show_cursor()
+
+    def _hide_cursor(self):
+        """Скрывает курсор мыши."""
+        if not self._cursor_hidden:
+            self._cursor_hidden = True
+            from PyQt6.QtGui import QCursor
+            from PyQt6.QtCore import Qt
+            self.web_view.setCursor(Qt.CursorShape.BlankCursor)
+
+    def _show_cursor(self):
+        """Показывает курсор мыши и перезапускает таймер."""
+        if self._cursor_hidden:
+            self._cursor_hidden = False
+            self.web_view.unsetCursor()
+        if self.config.get('cursor_autohide', True):
+            self._cursor_hide_timer.start(self._cursor_hide_delay)
+
+    def eventFilter(self, obj, event):
+        """Перехватываем события мыши на web_view."""
+        from PyQt6.QtCore import QEvent
+        if obj is self.web_view and event.type() == QEvent.Type.MouseMove:
+            self._show_cursor()
+        return super().eventFilter(obj, event)
+
+    def mouseMoveEvent(self, event):
+        """При движении мыши — показываем курсор и сбрасываем таймер."""
+        self._show_cursor()
+        super().mouseMoveEvent(event)
+
     def load_book(self, book_path):
         self._apply_screen_inhibit()
+        self._apply_cursor_autohide()
+        # Сообщаем TTS контроллеру путь к книге для локальных коррекций
+        if hasattr(self.tts_controller, "set_current_book"):
+            self.tts_controller.set_current_book(str(book_path))
         # Вызываем book.destroy() перед сменой книги — освобождает blob URLs
         # и позволяет GC собрать старую книгу (особенно важно для FB2).
         if self.current_book and self.page_loaded:
@@ -751,9 +988,9 @@ class ReaderWindow(QMainWindow):
 
     def _page_nav(self, direction: str):
         if direction == 'next':
-            self.web_view.page().runJavaScript("view && view.renderer && view.renderer.next();")
+            self.web_view.page().runJavaScript("window._pageNext && window._pageNext();")
         else:
-            self.web_view.page().runJavaScript("view && view.renderer && view.renderer.prev();")
+            self.web_view.page().runJavaScript("window._pagePrev && window._pagePrev();")
 
     def _clear_fb2_cache(self):
         """
@@ -781,11 +1018,40 @@ class ReaderWindow(QMainWindow):
         except Exception:
             pass
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_loading_overlay'):
+            if self._loading_overlay.isVisible():
+                self._loading_overlay.setGeometry(self.rect())
+            elif self.web_view.isVisible():
+                # Отменяем предыдущий таймер если ещё не сработал
+                if hasattr(self, '_resize_hide_timer'):
+                    self._resize_hide_timer.stop()
+                self._loading_overlay.set_book_name('')
+                self._loading_overlay.setGeometry(self.rect())
+                self._loading_overlay.show()
+                self._resize_hide_timer = QTimer(self)
+                self._resize_hide_timer.setSingleShot(True)
+                self._resize_hide_timer.timeout.connect(self._loading_overlay.fadeOut)
+                self._resize_hide_timer.start(250)
+
     def closeEvent(self, event):
         if self._closing:
             event.accept()
             return
         self._closing = True
+
+        # Немедленно останавливаем все таймеры оверлея — иначе зависание
+        if hasattr(self, '_resize_hide_timer'):
+            self._resize_hide_timer.stop()
+        if hasattr(self, '_loading_overlay'):
+            self._loading_overlay.forceHide()
+
+        # Сохраняем размер только если не максимизировано
+        if not self.isMaximized():
+            self.config.set('reader_width', self.width())
+            self.config.set('reader_height', self.height())
+            self.config.save()
 
         # Снимаем запрет гашения экрана при закрытии
         try:

@@ -1,257 +1,345 @@
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QMessageBox, QGroupBox)
-from PyQt6.QtCore import Qt
+                             QHeaderView, QMessageBox, QCheckBox,
+                             QWidget, QFrame, QApplication)
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor, QPalette
 import json
 
 
+def _sys(role, group=QPalette.ColorGroup.Normal):
+    return QApplication.palette().color(group, role).name()
+
+def _blend(c1, c2, r=0.5):
+    a, b = QColor(c1), QColor(c2)
+    return QColor(int(a.red()*(1-r)+b.red()*r),
+                  int(a.green()*(1-r)+b.green()*r),
+                  int(a.blue()*(1-r)+b.blue()*r)).name()
+
+def _build_style():
+    bg      = _sys(QPalette.ColorRole.Window)
+    surface = _sys(QPalette.ColorRole.Base)
+    text    = _sys(QPalette.ColorRole.WindowText)
+    border  = _sys(QPalette.ColorRole.Mid)
+    accent  = _sys(QPalette.ColorRole.Highlight)
+    sub     = _blend(text, bg, 0.45)
+    hover   = _blend(bg, text, 0.06)
+    sel_bg  = _sys(QPalette.ColorRole.Highlight)
+    sel_txt = _sys(QPalette.ColorRole.HighlightedText)
+    alt     = _blend(bg, surface, 0.5)
+
+    return bg, f"""
+QDialog {{
+    background: {bg};
+    color: {text};
+    font-family: 'Segoe UI', 'SF Pro Text', 'Helvetica Neue', sans-serif;
+}}
+QLabel {{ color: {text}; background: transparent; }}
+
+/* Вкладки */
+QTabWidget::pane {{
+    border: 1px solid {border};
+    border-radius: 6px;
+    background: {surface};
+}}
+QTabBar::tab {{
+    background: {bg};
+    color: {sub};
+    padding: 7px 20px;
+    border: 1px solid {border};
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    margin-right: 2px;
+    font-size: 13px;
+}}
+QTabBar::tab:selected {{
+    background: {surface};
+    color: {text};
+    font-weight: 600;
+    border-bottom: 1px solid {surface};
+}}
+QTabBar::tab:hover:!selected {{ background: {hover}; color: {text}; }}
+
+/* Таблица */
+QTableWidget {{
+    background: {surface};
+    alternate-background-color: {alt};
+    color: {text};
+    gridline-color: {border};
+    border: none;
+    border-radius: 0;
+    selection-background-color: {sel_bg};
+    selection-color: {sel_txt};
+    font-size: 13px;
+    outline: none;
+}}
+QTableWidget::item {{ padding: 4px 8px; border: none; }}
+QTableWidget::item:selected {{
+    background: {sel_bg};
+    color: {sel_txt};
+}}
+QHeaderView {{
+    background: {bg};
+    border: none;
+}}
+QHeaderView::section {{
+    background: {bg};
+    color: {sub};
+    padding: 6px 8px;
+    border: none;
+    border-bottom: 1px solid {border};
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+}}
+QScrollBar:vertical {{
+    width: 6px; background: transparent;
+}}
+QScrollBar::handle:vertical {{
+    background: {border}; border-radius: 3px; min-height: 24px;
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar:horizontal {{
+    height: 6px; background: transparent;
+}}
+QScrollBar::handle:horizontal {{
+    background: {border}; border-radius: 3px;
+}}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+
+/* Чекбокс */
+QCheckBox::indicator {{
+    width: 16px; height: 16px;
+    border-radius: 4px;
+    border: 2px solid {border};
+    background: {bg};
+}}
+QCheckBox::indicator:checked {{
+    background: {accent}; border-color: {accent};
+}}
+
+/* Кнопки */
+QPushButton {{
+    background: {_blend(bg, surface, 0.5)};
+    border: 1px solid {border};
+    border-radius: 6px;
+    color: {text};
+    padding: 6px 16px;
+    font-size: 13px;
+    min-width: 80px;
+}}
+QPushButton:hover {{ background: {hover}; border-color: {accent}; }}
+QPushButton:pressed {{ background: {bg}; }}
+QPushButton:default {{
+    background: {accent};
+    border: none;
+    color: white;
+    font-weight: 600;
+}}
+QPushButton:default:hover {{ background: {_blend(accent, '#ffffff', 0.15)}; }}
+QPushButton:disabled {{ color: {sub}; border-color: {border}; }}
+"""
+
+
 class TTSCorrectionWindow(QDialog):
-    """Окно коррекции произношения TTS — список пар (неправильно → правильно)"""
+    """Окно коррекции произношения TTS — глобальные и книжные замены"""
 
     def __init__(self, config, reader_window):
         super().__init__(reader_window)
         self.config = config
         self.reader_window = reader_window
         self._loading = False
+        self._book_path = getattr(reader_window, 'current_book', None)
 
         self.setWindowTitle("Исправление произношения TTS")
-        self.setMinimumSize(500, 400)
+        self.setMinimumSize(560, 480)
         self.setModal(False)
+
+        # Применяем системную тему
+        bg, style = _build_style()
+        self.setStyleSheet(style)
 
         self._setup_ui()
         self._load_corrections()
 
     def _js(self, code):
-        """Выполнить JavaScript в reader"""
-        if self.reader_window and self.reader_window.web_view and self.reader_window.web_view.page():
+        if self.reader_window and self.reader_window.web_view:
             self.reader_window.web_view.page().runJavaScript(code)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 14)
+        layout.setSpacing(12)
 
         # Описание
-        desc_group = QGroupBox("Как это работает")
-        desc_layout = QVBoxLayout(desc_group)
-        desc_label = QLabel(
+        desc = QLabel(
             "Добавьте слова или фразы, которые TTS читает неправильно.\n"
-            "TTS заменит их на правильный вариант перед чтением.\n\n"
-            "Пример: О,О → ОКЕЙ (чтобы читалось как «ОКЕЙ», а не «О запятая О»)"
+            "Глобальные замены применяются ко всем книгам, "
+            "книжные — только к текущей."
         )
-        desc_label.setWordWrap(True)
-        desc_layout.addWidget(desc_label)
-        layout.addWidget(desc_group)
+        desc.setWordWrap(True)
+        desc.setStyleSheet("font-size: 12px; opacity: 0.7;")
+        layout.addWidget(desc)
 
-        # Таблица пар
-        table_group = QGroupBox("Список замен")
-        table_layout = QVBoxLayout(table_group)
-        
-        self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Неправильно", "Правильно", ""])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(2, 50)
-        self.table.setAlternatingRowColors(True)
-        self.table.setStyleSheet("""
-            QTableWidget {
-                gridline-color: rgba(0,0,0,0.1);
-                border: 1px solid rgba(0,0,0,0.15);
-                border-radius: 6px;
-            }
-            QTableWidget::item {
-                padding: 6px;
-            }
-            QHeaderView::section {
-                background: rgba(0,0,0,0.05);
-                padding: 8px;
-                border: none;
-                font-weight: 600;
-            }
-        """)
-        table_layout.addWidget(self.table)
+        # Разделитель
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        bg  = QApplication.palette().color(QPalette.ColorGroup.Normal, QPalette.ColorRole.Mid).name()
+        sep.setStyleSheet(f"background: {bg}; max-height: 1px;")
+        layout.addWidget(sep)
 
-        # Кнопки управления таблицей
+        # Вкладки
+        from PyQt6.QtWidgets import QTabWidget
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._make_table_tab('global'), "Глобальные")
+        book_label = "Эта книга" if self._book_path else "Эта книга (нет)"
+        self.tabs.addTab(self._make_table_tab('book'), book_label)
+        if not self._book_path:
+            self.tabs.setTabEnabled(1, False)
+        layout.addWidget(self.tabs, 1)
+
+        # Нижняя панель
         btn_layout = QHBoxLayout()
-        
-        self.add_btn = QPushButton("+ Добавить пару")
-        self.add_btn.clicked.connect(self._add_row)
-        self.add_btn.setStyleSheet("""
-            QPushButton {
-                background: #1a73e8;
-                color: white;
-                border-radius: 6px;
-                padding: 8px 16px;
-                font-weight: 500;
-            }
-            QPushButton:hover { background: #1557b0; }
-        """)
-        btn_layout.addWidget(self.add_btn)
-        
-        btn_layout.addStretch()
-        
-        self.delete_btn = QPushButton("Удалить выбранное")
-        self.delete_btn.clicked.connect(self._delete_selected)
-        self.delete_btn.setStyleSheet("""
-            QPushButton {
-                background: #d93025;
-                color: white;
-                border-radius: 6px;
-                padding: 8px 16px;
-            }
-            QPushButton:hover { background: #b31412; }
-        """)
-        btn_layout.addWidget(self.delete_btn)
-        
-        table_layout.addLayout(btn_layout)
-        layout.addWidget(table_group)
+        btn_layout.setSpacing(8)
 
-        # Кнопки внизу
-        bottom_layout = QHBoxLayout()
-        
-        self.info_label = QLabel("0 пар")
-        self.info_label.setStyleSheet("color: #666; font-size: 12px;")
-        bottom_layout.addWidget(self.info_label)
-        
-        bottom_layout.addStretch()
-        
+        self.info_label = QLabel("")
+        self.info_label.setStyleSheet("font-size: 12px;")
+        btn_layout.addWidget(self.info_label)
+        btn_layout.addStretch()
+
+        add_btn = QPushButton("+ Добавить")
+        add_btn.clicked.connect(self._add_row)
+        btn_layout.addWidget(add_btn)
+
+        del_btn = QPushButton("Удалить")
+        del_btn.clicked.connect(self._delete_selected)
+        btn_layout.addWidget(del_btn)
+
         self.save_btn = QPushButton("Сохранить")
         self.save_btn.clicked.connect(self._save_corrections)
-        self.save_btn.setStyleSheet("""
-            QPushButton {
-                background: #1a73e8;
-                color: white;
-                border-radius: 6px;
-                padding: 8px 24px;
-                font-weight: 500;
-            }
-            QPushButton:hover { background: #1557b0; }
-            QPushButton:disabled {
-                background: #3c4043;
-                color: #666;
-            }
-        """)
-        bottom_layout.addWidget(self.save_btn)
-        
-        self.close_btn = QPushButton("Закрыть")
-        self.close_btn.clicked.connect(self.accept)
-        self.close_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(255,255,255,0.1);
-                border-radius: 6px;
-                padding: 8px 24px;
-            }
-            QPushButton:hover { background: rgba(255,255,255,0.2); }
-        """)
-        bottom_layout.addWidget(self.close_btn)
-        
-        layout.addLayout(bottom_layout)
+        self.save_btn.setDefault(True)
+        btn_layout.addWidget(self.save_btn)
 
-    def _add_row(self, wrong="", correct=""):
-        """Добавить новую строку в таблицу"""
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        
-        wrong_item = QTableWidgetItem(wrong)
-        wrong_item.setFlags(wrong_item.flags() | Qt.ItemFlag.ItemIsEditable)
-        self.table.setItem(row, 0, wrong_item)
-        
-        correct_item = QTableWidgetItem(correct)
-        correct_item.setFlags(correct_item.flags() | Qt.ItemFlag.ItemIsEditable)
-        self.table.setItem(row, 1, correct_item)
-        
-        # Кнопка удаления
-        del_btn = QPushButton("")
-        del_btn.setFixedSize(32, 32)
-        del_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #999;
-                border-radius: 16px;
-                font-size: 16px;
-            }
-            QPushButton:hover {
-                background: rgba(217, 48, 37, 0.15);
-                color: #d93025;
-            }
-        """)
-        del_btn.clicked.connect(lambda: self._delete_row(row))
-        self.table.setCellWidget(row, 2, del_btn)
-        
-        self._update_info()
+        layout.addLayout(btn_layout)
+        self.tabs.currentChanged.connect(self._update_info)
 
-    def _delete_row(self, row):
-        """Удалить строку по индексу"""
-        self.table.removeRow(row)
+    def _make_table_tab(self, scope: str) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(0)
+
+        table = QTableWidget()
+        table.setColumnCount(3)
+        table.setHorizontalHeaderLabels(["Неправильно", "Правильно", "Без регистра"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(2, 90)
+        table.setAlternatingRowColors(True)
+        table.setShowGrid(False)
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setFrameShape(QFrame.Shape.NoFrame)
+        table.verticalHeader().setDefaultSectionSize(34)
+
+        layout.addWidget(table)
+        setattr(self, f'_{scope}_table', table)
+        return widget
+
+    def _current_table(self) -> QTableWidget:
+        scope = 'global' if self.tabs.currentIndex() == 0 else 'book'
+        return getattr(self, f'_{scope}_table')
+
+    def _add_row(self, wrong="", correct="", case_insensitive=True, table=None):
+        t = table or self._current_table()
+        row = t.rowCount()
+        t.insertRow(row)
+        t.setItem(row, 0, QTableWidgetItem(wrong))
+        t.setItem(row, 1, QTableWidgetItem(correct))
+
+        cb = QCheckBox()
+        cb.setChecked(case_insensitive)
+        cb.setToolTip("Без учёта регистра")
+        container = QWidget()
+        container.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(container)
+        h.addWidget(cb)
+        h.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        h.setContentsMargins(0, 0, 0, 0)
+        t.setCellWidget(row, 2, container)
         self._update_info()
 
     def _delete_selected(self):
-        """Удалить выбранную строку"""
-        selected_rows = self.table.selectedItems()
-        if not selected_rows:
+        t = self._current_table()
+        rows = sorted(set(i.row() for i in t.selectedItems()), reverse=True)
+        if not rows:
             QMessageBox.information(self, "Удаление", "Выберите строку для удаления")
             return
-        
-        row = selected_rows[0].row()
-        self._delete_row(row)
+        for row in rows:
+            t.removeRow(row)
+        self._update_info()
 
     def _load_corrections(self):
-        """Загрузить список коррекций из конфига"""
         self._loading = True
         try:
-            corrections = self.config.get('tts_corrections', [])
-            self.table.setRowCount(0)
-            for item in corrections:
-                self._add_row(item.get('wrong', ''), item.get('correct', ''))
+            for item in self.config.get_corrections_global():
+                self._add_row(item.get('wrong',''), item.get('correct',''),
+                               item.get('case_insensitive', True), self._global_table)
+            if self._book_path:
+                for item in self.config.get_corrections_for_book(self._book_path):
+                    self._add_row(item.get('wrong',''), item.get('correct',''),
+                                   item.get('case_insensitive', True), self._book_table)
         finally:
             self._loading = False
+        self._update_info()
+
+    def _read_table(self, table: QTableWidget) -> list:
+        result = []
+        for row in range(table.rowCount()):
+            wrong   = (table.item(row, 0) or QTableWidgetItem()).text().strip()
+            correct = (table.item(row, 1) or QTableWidgetItem()).text().strip()
+            if not wrong:
+                continue
+            container = table.cellWidget(row, 2)
+            cb = container.findChild(QCheckBox) if container else None
+            result.append({'wrong': wrong, 'correct': correct,
+                           'case_insensitive': cb.isChecked() if cb else True})
+        return result
 
     def _save_corrections(self):
-        """Сохранить список коррекций в конфиг и отправить в JS"""
-        corrections = []
-        for row in range(self.table.rowCount()):
-            wrong_item = self.table.item(row, 0)
-            correct_item = self.table.item(row, 1)
-            wrong = wrong_item.text().strip() if wrong_item else ''
-            correct = correct_item.text().strip() if correct_item else ''
-            if wrong and correct:
-                corrections.append({'wrong': wrong, 'correct': correct})
-        
-        self.config.set('tts_corrections', corrections)
-        
-        # Отправить в JS для обновления
-        self._js(f"""
-            if (window.updateTTSCorrections) {{
-                window.updateTTSCorrections({json.dumps(corrections)});
-            }}
-        """)
-        
-        # Визуальное подтверждение
-        orig_text = self.save_btn.text()
-        self.save_btn.setText(" Сохранено")
+        global_list = self._read_table(self._global_table)
+        self.config.set_corrections_global(global_list)
+        if self._book_path:
+            book_list = self._read_table(self._book_table)
+            self.config.set_corrections_for_book(self._book_path, book_list)
+
+        all_corrections = global_list + (
+            self._read_table(self._book_table) if self._book_path else [])
+        self._js(f"if(window.updateTTSCorrections){{window.updateTTSCorrections({json.dumps(all_corrections)});}}")
+
+        orig = self.save_btn.text()
+        self.save_btn.setText("✓ Сохранено")
         self.save_btn.setEnabled(False)
-        from PyQt6.QtCore import QTimer
         QTimer.singleShot(1500, lambda: (
-            self.save_btn.setText(orig_text),
+            self.save_btn.setText(orig),
             self.save_btn.setEnabled(True)
         ))
-        
         self._update_info()
 
     def _update_info(self):
-        """Обновить информацию о количестве пар"""
-        count = self.table.rowCount()
-        self.info_label.setText(f"{count} {self._plural(count, 'пара', 'пары', 'пар')}")
+        t = self._current_table()
+        count = t.rowCount()
+        scope = "глобальных" if self.tabs.currentIndex() == 0 else "книжных"
+        self.info_label.setText(f"{count} {scope} замен")
 
-    @staticmethod
-    def _plural(n, one, two, five):
-        """Склонение слов: n пара/пары/пар"""
-        n = abs(n) % 100
-        n1 = n % 10
-        if n > 10 and n < 20:
-            return five
-        if n1 > 1 and n1 < 5:
-            return two
-        if n1 == 1:
-            return one
-        return five
+    def closeEvent(self, event):
+        self._save_corrections()
+        event.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_S and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            self._save_corrections()
+        else:
+            super().keyPressEvent(event)

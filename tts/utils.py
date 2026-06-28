@@ -77,16 +77,66 @@ def roman_to_arabic(text: str) -> str:
     return result
 
 
+# Фразы-маркеры рекламных секций пиратских сайтов.
+# Если текст СОДЕРЖИТ хотя бы одну из этих фраз — он полностью пропускается.
+# Используется как резервный фильтр на уровне Python после JS-фильтрации.
+_AD_MARKERS = [
+    'searchfloor.org',
+    'цокольным этажом',
+    'цокольный этаж',
+    'книга предоставлена',
+    'сайт заблокирован в России',
+    'наградите автора лайком',
+    'telegram-бот',
+    'антизапрет',
+    'censor tracker',
+    'от автора раздачи',
+    'от оцифровщика',
+    'от сканировщика',
+]
+
+
+def is_ad_text(text: str) -> bool:
+    """
+    Возвращает True если текст содержит маркеры рекламных секций.
+    Используется как резервный фильтр перед отправкой в TTS.
+    Визуально скрытый текст (display:none) фильтруется в JS,
+    этот фильтр ловит то что JS мог пропустить.
+    """
+    lower = text.lower()
+    return any(marker in lower for marker in _AD_MARKERS)
+
+
 def preprocess_ssml(text: str) -> str:
     """
-    Очищает SSML перед отправкой в TTS (как в Readest)
-    Удаляет/заменяет проблемные теги и символы
+    Очищает SSML перед отправкой в TTS.
+    Удаляет/заменяет проблемные теги и символы.
+    Возвращает пустую строку если текст является рекламой или разделителем.
     """
+    # Резервный фильтр рекламных секций пиратских сайтов
+    if is_ad_text(text):
+        return ''
+
+    # Фильтр разделителей глав/секций: *** / * * * / --- и т.п.
+    # Если весь текст — только звёздочки, дефисы и пробелы → пропускаем целиком.
+    if re.match(r'^[\s*\-–—_~]+$', text):
+        return ''
+    # Если *** встречается внутри текста — удаляем его, не озвучиваем.
+    text = re.sub(r'\s*\*\s*\*\s*\*\s*', ' ', text)
+
     # Удаляем emphasis теги: <emphasis[^>]*>([^<]+)</emphasis> → $1
     text = re.sub(r'<emphasis[^>]*>([^<]+)</emphasis>', r'\1', text)
 
-    # Конвертируем em dash в запятые
-    text = re.sub(r'[–—]', ',', text)
+    # Конвертируем em dash/en dash в запятые — НО не между числами.
+    # "20–30" (диапазон) → "от 20 до 30", а "слово — слово" → "слово, слово"
+    def replace_dash(m):
+        before = m.string[max(0, m.start()-3):m.start()]
+        after  = m.string[m.end():m.end()+3]
+        # Если с обеих сторон цифры — это диапазон
+        if re.search(r'\d$', before) and re.search(r'^\d', after):
+            return ' до '
+        return ','
+    text = re.sub(r'[–—]', replace_dash, text)
 
     # Заменяем break теги на пробел
     text = re.sub(r'<break\s*/?>', ' ', text)
@@ -100,14 +150,61 @@ def preprocess_ssml(text: str) -> str:
     return text.strip()
 
 
-def normalize_text_for_tts(text: str) -> str:
+def apply_user_corrections(text: str, config, book_path: str = None) -> str:
+    """
+    Применяет пользовательские замены произношения.
+    Сначала книжные (локальные), потом глобальные.
+    Поддерживает опцию case_insensitive для каждой пары.
+    """
+    import re
+
+    def apply_list(corrections: list, src: str) -> str:
+        for item in corrections:
+            wrong   = item.get('wrong', '').strip()
+            correct = item.get('correct', '').strip()
+            if not wrong:
+                continue
+            case_insensitive = item.get('case_insensitive', True)
+            flags = re.IGNORECASE if case_insensitive else 0
+            try:
+                new_src = re.sub(re.escape(wrong), correct, src, flags=flags)
+            except re.error:
+                new_src = src.replace(wrong, correct)
+            if new_src != src:
+                print(f"[TTS] Замена: '{wrong}' → '{correct}'")
+                src = new_src
+        return src
+
+    # 1. Книжные замены (приоритет выше)
+    if book_path and hasattr(config, 'get_corrections_for_book'):
+        book_corrections = config.get_corrections_for_book(book_path)
+        if book_corrections:
+            text = apply_list(book_corrections, text)
+
+    # 2. Глобальные замены
+    if hasattr(config, 'get_corrections_global'):
+        global_corrections = config.get_corrections_global()
+    else:
+        global_corrections = config.get('tts_corrections_global', []) or config.get('tts_corrections', [])
+    if global_corrections:
+        text = apply_list(global_corrections, text)
+
+    return text
+
+
+def normalize_text_for_tts(text: str, config=None, book_path: str = None) -> str:
     """
     Полная нормализация текста для TTS.
     Включает:
         - Конвертацию римских цифр в арабские
         - Очистку SSML
     """
-    # Сначала конвертируем римские цифры
+    # Сначала пользовательские замены — до любой нормализации,
+    # чтобы пользователь мог заменять текст в оригинальном виде
+    # (например "рублей 20–30" с тире, до того как тире → "до")
+    if config is not None:
+        text = apply_user_corrections(text, config, book_path)
+    # Затем конвертируем римские цифры
     text = roman_to_arabic(text)
     # Затем очищаем SSML
     text = preprocess_ssml(text)

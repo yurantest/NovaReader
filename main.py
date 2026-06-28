@@ -181,28 +181,71 @@ import subprocess
 
 
 def _setup_logging(config):
-    """Настройка логирования.
-    debug_log=True  → все print() и ошибки пишутся в файл debug.log.
-    debug_log=False → stdout подавляется, stderr остаётся (реальные ошибки видны).
     """
-    import io
+    Настройка логирования.
+
+    ⚠️ НА WINDOWS: полное отключение подавления вывода!
+    debug_log=True  → все print() и ошибки пишутся в файл debug.log.
+    debug_log=False → вывод НЕ подавляется (на Windows это безопаснее).
+    """
+    import os as _os
+
     debug_enabled = config.get('debug_log', False)
 
+    # Windows: НИКОГДА не подавляем вывод — иначе программа падает молча
+    if sys.platform == 'win32':
+        if debug_enabled:
+            try:
+                log_path = config.config_dir / 'debug.log'
+                log_fd = _os.open(str(log_path),
+                                  _os.O_WRONLY | _os.O_CREAT | _os.O_APPEND, 0o644)
+                _os.dup2(log_fd, 1)
+                _os.dup2(log_fd, 2)
+                _os.close(log_fd)
+                f = _os.fdopen(_os.dup(1), 'w', encoding='utf-8', errors='replace')
+                sys.stdout = f
+                sys.stderr = f
+                print("[Debug] === Запуск приложения ===", flush=True)
+                for line in _startup_diag:
+                    print(line, flush=True)
+            except Exception as e:
+                print(f"[Warning] Не удалось открыть лог-файл: {e}", flush=True)
+        else:
+            # На Windows НЕ ПОДАВЛЯЕМ вывод, чтобы видеть ошибки
+            print("[Setup] Windows: подавление вывода ОТКЛЮЧЕНО", flush=True)
+        return
+
+    # Linux / macOS: оставляем старую логику
     if debug_enabled:
         log_path = config.config_dir / 'debug.log'
         try:
-            f = open(log_path, 'a', encoding='utf-8', buffering=1)
+            log_fd = _os.open(str(log_path),
+                              _os.O_WRONLY | _os.O_CREAT | _os.O_APPEND, 0o644)
+            _os.dup2(log_fd, 1)
+            _os.dup2(log_fd, 2)
+            _os.close(log_fd)
+            f = _os.fdopen(_os.dup(1), 'w', encoding='utf-8', errors='replace')
             sys.stdout = f
             sys.stderr = f
-            print(f"[Debug] === Запуск приложения ===")
+            print("[Debug] === Запуск приложения ===", flush=True)
             for line in _startup_diag:
-                print(line)
+                print(line, flush=True)
         except Exception:
             pass
     else:
-        # Подавляем только stdout — stderr оставляем для реальных ошибок
-        # (ImportError, missing libs, traceback и т.п. будут видны в терминале)
-        sys.stdout = io.StringIO()
+        # На Linux/Mac можно подавлять
+        try:
+            devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
+            _os.dup2(devnull_fd, 1)
+            _os.dup2(devnull_fd, 2)
+            _os.close(devnull_fd)
+        except Exception:
+            pass
+        _devnull = open(_os.devnull, 'w')
+        sys.stdout = _devnull
+        sys.stderr = _devnull
+
+
 from config import Config
 from library_window import LibraryWindow
 from reader_window import ReaderWindow
@@ -223,32 +266,22 @@ def _is_process_running(pid: int) -> bool:
     try:
         if sys.platform == 'win32':
             import ctypes
-            handle = ctypes.windll.kernel32.OpenProcess(0x400, False, pid)  # PROCESS_QUERY_INFORMATION
+            handle = ctypes.windll.kernel32.OpenProcess(0x400, False, pid)
             if handle == 0:
                 return False
             exit_code = ctypes.c_ulong(0)
             ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
             ctypes.windll.kernel32.CloseHandle(handle)
-            return exit_code.value == 259  # STILL_ACTIVE
+            return exit_code.value == 259
         else:
-            os.kill(pid, 0)   # сигнал 0 — только проверка существования
+            os.kill(pid, 0)
             return True
     except (OSError, ProcessLookupError):
         return False
 
 
 def _wait_for_previous_instance():
-    """
-    Ждёт завершения предыдущего экземпляра NovaReader.
-
-    Проблема без этого:
-      Старый процесс ещё пишет GPU shader cache → новый стартует,
-      _clear_webengine_cache() удаляет файлы → старый дописывает новые →
-      Chromium нового экземпляра находит свежие файлы и загружает в RAM → 1.3 ГБ.
-
-    Решение: читаем PID предыдущего запуска. Если процесс жив — ждём до 8 секунд.
-    После ожидания (или если процесс уже мёртв) — чистим кэш и запускаем Chromium.
-    """
+    """Ждёт завершения предыдущего экземпляра NovaReader."""
     pid_file = _get_pid_file()
     if pid_file.exists():
         try:
@@ -267,7 +300,6 @@ def _wait_for_previous_instance():
             else:
                 print(f"[App]  Предыдущий экземпляр завершился")
 
-    # Записываем свой PID
     try:
         pid_file.write_text(str(os.getpid()))
     except OSError as e:
@@ -283,11 +315,7 @@ def _remove_pid_file():
 
 
 def _get_webengine_cache_dir() -> Path:
-    """
-    Возвращает путь к директории кэша WebEngine.
-    Qt хранит данные в ~/.cache/<AppName>/QtWebEngine/Default/ (Linux)
-    или %LOCALAPPDATA%/<AppName>/QtWebEngine/Default/ (Windows).
-    """
+    """Возвращает путь к директории кэша WebEngine."""
     import os
     app_name = "NovaReader"
     if sys.platform == 'win32':
@@ -298,25 +326,16 @@ def _get_webengine_cache_dir() -> Path:
 
 
 def _clear_webengine_cache():
-    """
-    Удаляет накопившийся GPU shader cache и Code Cache между сессиями.
-    Именно эти папки при повторном запуске дают +700-900 МБ к RAM:
-    Chromium загружает их целиком в память на старте.
-
-    Безопасно: кэши полностью пересоздаются при следующем запуске.
-    Пользовательские данные (закладки, позиции) хранятся в config.json
-    и этой очисткой не затрагиваются.
-    """
+    """Удаляет накопившийся GPU shader cache и Code Cache между сессиями."""
     import shutil
     cache_root = _get_webengine_cache_dir()
-    # Удаляем только кэши — не трогаем LocalStorage и IndexedDB
     targets = [
-        cache_root / 'GPUCache',        # скомпилированные шейдеры GPU
-        cache_root / 'Code Cache',      # скомпилированный JS/WASM
-        cache_root / 'Cache',           # HTTP-кэш (уже отключён флагом, но на диске есть)
-        cache_root / 'ShaderCache',     # альтернативное имя в некоторых версиях Qt
-        cache_root / 'blob_storage',    # временные Blob-объекты
-        cache_root / 'DawnCache',       # Dawn GPU shader cache (Qt 6.5+)
+        cache_root / 'GPUCache',
+        cache_root / 'Code Cache',
+        cache_root / 'Cache',
+        cache_root / 'ShaderCache',
+        cache_root / 'blob_storage',
+        cache_root / 'DawnCache',
     ]
     cleared = []
     for target in targets:
@@ -333,65 +352,30 @@ def _clear_webengine_cache():
 
 
 def _configure_webengine_profile():
-    """
-    Настраивает профиль WebEngine ДО создания любого QWebEngineView.
-
-    Порядок критичен: если вызвать после создания вида — часть кэшей
-    уже загружена в память и настройки не имеют эффекта.
-
-    Что делаем:
-    - Отключаем HTTP-кэш (NoCache)
-    - Направляем persistent storage в temp-директорию (очищается при перезапуске)
-    - Отключаем persistent cookies
-    - Устанавливаем кастомный cache path → туда пойдёт GPUCache при следующем
-      запуске (мы его очищаем в _clear_webengine_cache при старте)
-    """
+    """Настраивает профиль WebEngine ДО создания любого QWebEngineView."""
     from PyQt6.QtWebEngineCore import QWebEngineProfile
 
     profile = QWebEngineProfile.defaultProfile()
 
-    # HTTP-кэш — полностью отключаем
     try:
         profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
     except AttributeError:
         pass
     profile.setHttpCacheMaximumSize(0)
 
-    # Persistent cookies — не нужны читалке
     try:
         profile.setPersistentCookiesPolicy(
             QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
     except AttributeError:
         pass
 
-    # Кастомный cache path — туда Qt запишет GPUCache при этом сеансе.
-    # Мы очищаем эту директорию при следующем запуске (_clear_webengine_cache).
-    # Нельзя ставить пустую строку — Qt откатится к дефолтному пути.
     cache_dir = _get_webengine_cache_dir()
     try:
         profile.setCachePath(str(cache_dir))
     except AttributeError:
         pass
 
-    # Persistent storage (localStorage с TTS-настройками, IndexedDB).
-    # ВАЖНО: нельзя использовать /tmp — localStorage теряется после ребута.
-    # НЕЛЬЗЯ использовать /dev/shm — это RAM-диск, увеличивает потребление памяти.
-    # Кладём в ~/.config/NovaReader/webengine_storage — рядом с config.json.
-    import os
-    if sys.platform == 'win32':
-        config_base = Path(os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming'))
-    else:
-        config_base = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
-    we_storage = config_base / 'NovaReader' / 'webengine_storage'
-    we_storage.mkdir(parents=True, exist_ok=True)
-    try:
-        profile.setPersistentStoragePath(str(we_storage))
-    except AttributeError:
-        pass
-
     print(f"[Profile]  WebEngine профиль настроен (cache→{cache_dir.name}, storage→tmp)")
-
-
 
 
 # ── Иконки/пути ──────────────────────────────────────────────────────────────
@@ -428,38 +412,47 @@ def _set_app_icon(app):
 
 def _load_fonts():
     if getattr(sys, 'frozen', False):
-        fonts_dir = Path(sys.executable).parent / 'fonts'
+        ibc_dir = Path(sys.executable).parent / 'ibc'
     else:
-        fonts_dir = Path(__file__).parent / 'fonts'
-    if not fonts_dir.exists():
-        print(f"[Font]  Папка fonts/ не найдена: {fonts_dir}")
-        return
-    for ttf in sorted(fonts_dir.glob('*.ttf')):
-        fid = QFontDatabase.addApplicationFont(str(ttf))
-        if fid >= 0:
-            print(f"[Font]  {ttf.name}: {QFontDatabase.applicationFontFamilies(fid)}")
-        else:
-            print(f"[Font]  Ошибка загрузки: {ttf.name}")
+        ibc_dir = Path(__file__).parent / 'ibc'
 
+    # Собираем папки для загрузки шрифтов:
+    # 1. ibc/ — системные шрифты программы
+    # 2. ibc/fonts/ — пользовательские шрифты (если программа в rw-папке)
+    # 3. ~/.config/NovaReader/fonts/ — пользовательские шрифты (fallback)
+    import os
+    if sys.platform == 'win32':
+        cfg_base = Path(os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming'))
+    else:
+        cfg_base = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
+    user_fonts_dir = cfg_base / 'NovaReader' / 'fonts'
+
+    dirs_to_scan = [ibc_dir, ibc_dir / 'fonts', user_fonts_dir]
+
+    for fonts_dir in dirs_to_scan:
+        if not fonts_dir.exists():
+            continue
+        pattern = '*.ttf' if fonts_dir == ibc_dir else '**/*.ttf'
+        for ttf in sorted(fonts_dir.glob(pattern)):
+            fid = QFontDatabase.addApplicationFont(str(ttf))
+            if fid >= 0:
+                print(f"[Font]  {ttf.name}: {QFontDatabase.applicationFontFamilies(fid)}")
+            else:
+                print(f"[Font]  Ошибка загрузки: {ttf.name}")
 
 def _make_splash_pixmap(icon_path: Path | None, w: int = 400, h: int = 260) -> QPixmap:
-    """
-    Рисует сплэш-экран: тёмный фон, иконка (если есть), название и статус.
-    Возвращает QPixmap для QSplashScreen.
-    """
+    """Рисует сплэш-экран."""
     px = QPixmap(w, h)
     px.fill(Qt.GlobalColor.transparent)
 
     painter = QPainter(px)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-    # Фон — скруглённый тёмный прямоугольник
     bg = QColor(28, 28, 32)
     painter.setBrush(bg)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawRoundedRect(0, 0, w, h, 16, 16)
 
-    # Тонкая рамка
     painter.setPen(QColor(70, 70, 85))
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.drawRoundedRect(1, 1, w - 2, h - 2, 15, 15)
@@ -474,9 +467,8 @@ def _make_splash_pixmap(icon_path: Path | None, w: int = 400, h: int = 260) -> Q
                                      Qt.TransformationMode.SmoothTransformation)
             ix = (w - size) // 2
             painter.drawPixmap(ix, 28, icon_px)
-            icon_h = size + 16   # отступ после иконки
+            icon_h = size + 16
 
-    # Название
     title_font = QFont()
     title_font.setPointSize(22)
     title_font.setWeight(QFont.Weight.Bold)
@@ -485,7 +477,6 @@ def _make_splash_pixmap(icon_path: Path | None, w: int = 400, h: int = 260) -> Q
     ty = 28 + icon_h
     painter.drawText(0, ty, w, 38, Qt.AlignmentFlag.AlignHCenter, "NovaReader")
 
-    # Подпись
     sub_font = QFont()
     sub_font.setPointSize(11)
     painter.setFont(sub_font)
@@ -498,32 +489,17 @@ def _make_splash_pixmap(icon_path: Path | None, w: int = 400, h: int = 260) -> Q
 
 
 def _build_reader_cmd(book_path: str) -> list:
-    """
-    Возвращает команду для запуска читалки в subprocess.
-
-    Nuitka копирует python3 интерпретатор в dist/ рядом с NovaReader,
-    и sys.executable указывает на него — поэтому нельзя определять режим
-    по имени exe (python3 есть и в source и в compiled).
-
-    Надёжный способ: ищем NovaReader бинарник рядом с sys.executable.
-    Если найден — compiled, запускаем его с --reader.
-    Если нет — source, запускаем интерпретатор + скрипт.
-    """
+    """Возвращает команду для запуска читалки в subprocess."""
     exe_dir = Path(sys.executable).parent
     for app_name in ('NovaReader', 'NovaReader.exe', 'main', 'main.exe'):
         app_bin = exe_dir / app_name
         if app_bin.exists():
             return [str(app_bin), '--reader', book_path]
-    # Source-режим
     return [sys.executable, str(Path(__file__).resolve()), '--reader', book_path]
 
 
 class _SubprocessAppInstance:
-    """
-    Заглушка app_instance для ReaderWindow запущенного в --reader режиме.
-    ReaderWindow ожидает объект с reader_windows и show_library().
-    В subprocess библиотека недоступна — show_library() просто закрывает окно.
-    """
+    """Заглушка app_instance для ReaderWindow запущенного в --reader режиме."""
     def __init__(self, window_ref_holder):
         self._holder = window_ref_holder
         self.library_window = None
@@ -539,12 +515,107 @@ class _SubprocessAppInstance:
             w.close()
 
 
-def _run_reader_mode(book_path: str):
+def _ask_book_action(app, parent_window, book_path: str, config) -> str:
     """
-    Режим читалки: запускается когда NovaReader вызван с флагом --reader.
-    Полностью изолированный процесс — при закрытии память освобождается.
-    Chromium-флаги уже выставлены вверху main.py до любых импортов PyQt6.
+    Показывает диалог выбора действия при открытии книги через ассоциацию.
+    Возвращает: 'open' | 'add_open' | 'add_only' | 'cancel'
     """
+    from pathlib import Path as _P
+    from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                  QPushButton, QLabel)
+    from PyQt6.QtGui import QFont as _QF
+    from PyQt6.QtCore import Qt as _Qt
+
+    lang = config.get('language', 'ru')
+    if lang == 'ru':
+        t_title  = 'Открыть книгу'
+        t_open   = 'Открыть'
+        t_addopen= 'Добавить и открыть'
+        t_add    = 'Только добавить'
+        t_cancel = 'Отмена'
+    else:
+        t_title  = 'Open book'
+        t_open   = 'Open'
+        t_addopen= 'Add and open'
+        t_add    = 'Add to library'
+        t_cancel = 'Cancel'
+
+    # Цвета из конфига темы
+    try:
+        from library_window import BG, SURFACE, BORDER, ACCENT, TEXT, SUB
+        from library_window import init_lib_colors
+        init_lib_colors(config)
+        from library_window import BG, SURFACE, BORDER, ACCENT, TEXT, SUB
+    except Exception:
+        BG='#1e1e2e'; SURFACE='#2a2a3a'; BORDER='#3a3a4a'
+        ACCENT='#7c5cbf'; TEXT='#e0e0e0'; SUB='#888888'
+
+    result = ['cancel']
+
+    dlg = QDialog(parent_window if parent_window else None)
+    dlg.setWindowTitle('NovaReader')
+    dlg.setModal(True)
+    dlg.setFixedWidth(420)
+    dlg.setStyleSheet(
+        f'QDialog{{background:{BG};color:{TEXT};}}'
+        f'QLabel{{color:{TEXT};}}'
+        f'QPushButton{{background:{SURFACE};color:{TEXT};'
+        f'border:1px solid {BORDER};border-radius:6px;'
+        f'padding:8px 14px;font-size:13px;min-width:0;}}'
+        f'QPushButton:hover{{border-color:{ACCENT};'
+        f'background:rgba(255,255,255,.08);}}'
+        f'QPushButton:pressed{{background:{ACCENT};'
+        f'color:#fff;border-color:{ACCENT};}}'
+    )
+
+    lay = QVBoxLayout(dlg)
+    lay.setSpacing(14)
+    lay.setContentsMargins(24, 22, 24, 20)
+
+    # Заголовок
+    lbl_title = QLabel(t_title)
+    f = _QF(); f.setPointSize(13); f.setBold(True)
+    lbl_title.setFont(f)
+    lay.addWidget(lbl_title)
+
+    # Имя файла
+    lbl_name = QLabel(_P(book_path).name)
+    lbl_name.setWordWrap(True)
+    lbl_name.setStyleSheet(f'color:{SUB};font-size:12px;')
+    lay.addWidget(lbl_name)
+
+    lay.addSpacing(4)
+
+    # Кнопки — акцент на «Добавить и открыть»
+    btn_open    = QPushButton(t_open)
+    btn_addopen = QPushButton(t_addopen)
+    btn_add     = QPushButton(t_add)
+    btn_cancel  = QPushButton(t_cancel)
+
+    btn_addopen.setStyleSheet(
+        f'QPushButton{{background:{ACCENT};color:#fff;'
+        f'border:1px solid {ACCENT};border-radius:6px;'
+        f'padding:8px 14px;font-size:13px;min-width:0;}}'
+        f'QPushButton:hover{{background:{ACCENT};opacity:.9;}}'
+    )
+
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    for b in (btn_open, btn_addopen, btn_add, btn_cancel):
+        row.addWidget(b)
+    lay.addLayout(row)
+
+    btn_open.clicked.connect(   lambda: (result.__setitem__(0,'open'),     dlg.accept()))
+    btn_addopen.clicked.connect(lambda: (result.__setitem__(0,'add_open'), dlg.accept()))
+    btn_add.clicked.connect(    lambda: (result.__setitem__(0,'add_only'), dlg.accept()))
+    btn_cancel.clicked.connect( dlg.reject)
+
+    dlg.exec()
+    return result[0]
+
+
+def _run_reader_mode(book_path: str, from_association: bool = False):
+    """Режим читалки: запускается когда NovaReader вызван с флагом --reader."""
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtWebEngineCore import QWebEngineProfile
 
@@ -554,9 +625,9 @@ def _run_reader_mode(book_path: str):
 
     app = QApplication(sys.argv)
     app.setApplicationName("NovaReader")
-    _set_app_icon(app)  # иначе Wayland/X11 показывает дефолтный значок
+    _load_fonts()  # загружаем шрифты и в режиме ридера
+    _set_app_icon(app)
 
-    # Настраиваем WebEngine профиль до создания QWebEngineView
     profile = QWebEngineProfile.defaultProfile()
     try:
         profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
@@ -573,6 +644,7 @@ def _run_reader_mode(book_path: str):
     from reader_window import ReaderWindow
 
     config = Config()
+    _setup_logging(config)  # логи читалки тоже пишем в debug.log если включено
 
     _window_ref = [None]
     app_instance = _SubprocessAppInstance(lambda: _window_ref[0])
@@ -586,8 +658,33 @@ def _run_reader_mode(book_path: str):
     _window_ref[0] = window
     window.destroyed.connect(lambda: _window_ref.__setitem__(0, None))
 
-    window.load_book(book_path)
-    window.show()
+    if from_association:
+        # Показываем диалог ДО показа окна читалки
+        # чтобы не ждать инициализации WebEngine зря
+        action = _ask_book_action(app, None, book_path, config)
+        if action == 'cancel':
+            sys.exit(0)
+
+        # Добавляем в библиотеку если нужно
+        if action in ('add_open', 'add_only'):
+            try:
+                from book_parser import BookParser
+                meta = BookParser.parse_meta(book_path)
+                if meta:
+                    config.add_book(meta)
+                    print(f'[Assoc] Книга добавлена: {book_path}')
+            except Exception as e:
+                print(f'[Assoc] Ошибка добавления: {e}')
+
+        if action == 'add_only':
+            sys.exit(0)
+
+        # Открываем читалку — WebEngine уже инициализирован пока показывался диалог
+        window.load_book(book_path)
+        window.show()
+    else:
+        window.load_book(book_path)
+        window.show()
 
     exit_code = app.exec()
     _window_ref[0] = None
@@ -597,48 +694,44 @@ def _run_reader_mode(book_path: str):
 class EbookReader:
     def __init__(self):
         self.app = QApplication(sys.argv)
+        # Принудительное сглаживание шрифтов на уровне программы,
+        # независимо от системных настроек
+        from PyQt6.QtGui import QFont
+        self.app.setDesktopSettingsAware(False)
+        default_font = self.app.font()
+        default_font.setStyleStrategy(
+            QFont.StyleStrategy.PreferAntialias |
+            QFont.StyleStrategy.PreferQuality
+        )
+        self.app.setFont(default_font)
         self.app.setApplicationName("NovaReader")
-        # Отключаем авто-выход при закрытии последнего окна.
-        # Иначе закрытие библиотеки убивает все читалки-subprocess через _on_quit.
-        # Выход управляется вручную через _check_reader_procs и _on_library_closed.
         self.app.setQuitOnLastWindowClosed(False)
         _load_fonts()
 
         self.config = Config()
         _setup_logging(self.config)
         _set_app_icon(self.app)
+        # Прогреваем кэш шрифтов сразу — чтобы getSettings() не тормозил при открытии книги
+        try:
+            self.config.get_font_file_map()
+        except Exception:
+            pass
 
         self.library_window = None
-        self.reader_windows = []   # оставляем для обратной совместимости с closeEvent
+        self.reader_windows = []
         self._reader_procs: list[tuple[str, subprocess.Popen]] = []
         self._webengine_ready = False
 
-        # Watchdog: каждую секунду проверяем живые subprocess-читалки.
-        # Запускается только после полной инициализации (_initialized=True),
-        # иначе срабатывает до создания library_window и вызывает app.quit().
         self._initialized = False
         self._proc_watchdog = QTimer()
         self._proc_watchdog.setInterval(1000)
         self._proc_watchdog.timeout.connect(self._check_reader_procs)
         self._proc_watchdog.start()
 
-        # ── Подготовка WebEngine ──────────────────────────────────────────────
-        # 0. Ждём завершения предыдущего экземпляра — иначе старый процесс
-        #    успевает записать GPU shader cache ПОСЛЕ нашей очистки.
         _wait_for_previous_instance()
-        # 1. Очищаем GPU shader cache и Code Cache с прошлого сеанса.
-        #    Именно они дают +700-900 МБ при повторном запуске: Chromium
-        #    загружает их целиком в RAM на старте.
-        # 2. Настраиваем профиль ДО создания любого QWebEngineView —
-        #    если сделать после, часть кэшей уже в памяти.
         _clear_webengine_cache()
         _configure_webengine_profile()
 
-        # ── Сплэш-экран ──────────────────────────────────────────────────────
-        # Показываем ДО открытия библиотеки: пока WebEngine инициализируется
-        # (компилирует шейдеры, поднимает Chromium), пользователь видит сплэш
-        # и не может открыть книгу раньше времени.  Это предотвращает сценарий
-        # «открыл книгу до готовности WebEngine → 1.3 ГБ вместо 600–800 МБ».
         icon_path = _find_icon_path()
         splash_px = _make_splash_pixmap(icon_path)
         self._splash = QSplashScreen(splash_px,
@@ -646,40 +739,18 @@ class EbookReader:
                                      Qt.WindowType.FramelessWindowHint)
         self._splash.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._splash.show()
-        self.app.processEvents()   # даём Qt отрисовать сплэш немедленно
+        self.app.processEvents()
 
-        # ── Прогрев WebEngine ─────────────────────────────────────────────────
-        # Создаём скрытый QWebEngineView — Chromium инициализируется при первом
-        # создании экземпляра.  loadFinished сигнализирует о готовности движка:
-        # шейдеры скомпилированы, процесс рендерера поднят.
         self._warmup_view = None
         self._start_webengine_warmup()
 
-        # Первый запуск: сразу показываем визард (без ожидания WebEngine —
-        # визард не использует WebEngine, блокировки нет).
         if self.config.is_first_run():
             self._show_wizard()
         else:
-            # Обычный запуск: ждём готовности WebEngine, потом открываем библиотеку
             self._open_library_when_ready()
 
-    # ── Прогрев WebEngine ─────────────────────────────────────────────────────
-
     def _start_webengine_warmup(self):
-        """
-        Прогрев WebEngine: about:blank + фиксированная пауза 3 секунды.
-
-        Почему НЕ reader.html:
-          reader.html в скрытом вью = вторая копия в памяти. Когда пользователь
-          открывает книгу → новый ReaderWindow грузит ещё одну копию reader.html.
-          Два экземпляра одновременно → 1.5 ГБ вместо 850 МБ.
-          Плюс reader.html ждёт WebChannel (которого нет в warmup-вью) → 94 секунды.
-
-        Почему about:blank + пауза:
-          about:blank запускает Chromium процесс и компилирует базовые GPU шейдеры.
-          Пауза 3 с даёт движку время завершить инициализацию до того как пользователь
-          сможет открыть книгу. Один экземпляр reader.html → нормальное потребление.
-        """
+        """Прогрев WebEngine: about:blank + фиксированная пауза 3 секунды."""
         from PyQt6.QtWebEngineWidgets import QWebEngineView
         from PyQt6.QtCore import QUrl
 
@@ -688,8 +759,6 @@ class EbookReader:
         self._warmup_view.resize(1, 1)
 
         def _on_blank_loaded(_ok):
-            # about:blank загружен — Chromium поднят, базовые шейдеры компилируются.
-            # Ждём ещё 3 секунды чтобы инициализация завершилась.
             elapsed_blank = int((time.monotonic() - self._warmup_start) * 1000)
             print(f"[App]  Chromium запущен ({elapsed_blank} мс), ждём 3 с...")
 
@@ -711,7 +780,6 @@ class EbookReader:
         self._warmup_view.load(QUrl("about:blank"))
         self._warmup_start = time.monotonic()
 
-        # Жёсткий таймаут 10 с на случай если loadFinished не придёт
         def _timeout():
             if not self._webengine_ready:
                 print("[App]  WebEngine warmup timeout — продолжаем")
@@ -725,12 +793,12 @@ class EbookReader:
 
         QTimer.singleShot(10000, _timeout)
         print("[App]  Инициализация WebEngine...")
+
     def _open_library_when_ready(self):
         """Открывает библиотеку: сразу если WebEngine готов, иначе — отложенно."""
         if self._webengine_ready:
             self._finish_show_library()
         else:
-            # Поднимем флаг — _on_ready откроет библиотеку сам
             self._library_pending = True
             print("[App]  Библиотека отложена — ждём WebEngine…")
 
@@ -743,7 +811,6 @@ class EbookReader:
         self.show_library()
 
     def _show_wizard(self):
-        # Визард не использует WebEngine → показываем сразу, сплэш закрываем
         if hasattr(self, '_splash') and self._splash:
             self._splash.close()
             self._splash = None
@@ -756,7 +823,6 @@ class EbookReader:
 
     def _on_wizard_completed(self, library_path):
         print(f"[App] Библиотека настроена: {library_path}")
-        # После визарда WebEngine может быть ещё не готов — ждём
         self._open_library_when_ready()
 
     def show_library(self):
@@ -774,9 +840,6 @@ class EbookReader:
             if not self.library_window:
                 print("[App] Создаём новое окно библиотеки")
                 self.library_window = LibraryWindow(self.config)
-                # WA_DeleteOnClose: Qt удаляет объект при закрытии окна,
-                # а не просто скрывает. Без этого флага destroyed не срабатывает
-                # и self.library_window остаётся не-None → app никогда не завершается.
                 self.library_window.setAttribute(
                     Qt.WidgetAttribute.WA_DeleteOnClose, True)
                 self.library_window.book_selected.connect(self.open_book)
@@ -806,23 +869,17 @@ class EbookReader:
         try:
             print(f"[App] Opening book: {book_path}")
 
-            # Если эта книга уже открыта в живом subprocess — не запускаем повторно
             for bp, proc in list(self._reader_procs):
                 if bp == book_path and proc.poll() is None:
                     print(f"[App] Книга уже открыта в процессе PID={proc.pid}, пропускаем")
                     return
 
-            # Сначала перечитываем positions.json с диска — subprocess мог записать
-            # свежий прогресс после последнего тика watchdog'а (раз в секунду).
-            # Только потом mark_as_read — иначе setdefault создаст пустую запись
-            # и save_positions() сотрёт прогресс ещё до запуска нового subprocess'а.
             self.config._positions = self.config._load_positions()
             self.config.mark_as_read(book_path)
 
             if self.library_window:
                 self.library_window._on_library_updated()
 
-            # Запускаем читалку в отдельном процессе
             cmd = _build_reader_cmd(book_path)
             proc = subprocess.Popen(cmd, env=os.environ.copy())
             self._reader_procs.append((book_path, proc))
@@ -831,10 +888,7 @@ class EbookReader:
             self._opening_book = False
 
     def _check_reader_procs(self):
-        """
-        Вызывается каждую секунду. Убирает завершившиеся subprocess'ы.
-        Если библиотека закрыта и читалок не осталось — выходим.
-        """
+        """Вызывается каждую секунду. Убирает завершившиеся subprocess'ы."""
         if not self._initialized:
             return
         before = len(self._reader_procs)
@@ -843,10 +897,13 @@ class EbookReader:
         finished = before - len(self._reader_procs)
         if finished:
             print(f"[App] Читалок завершилось: {finished}, осталось: {len(self._reader_procs)}")
-            # Subprocess записал позицию в positions.json — перечитываем с диска.
-            # Без этого главный процесс показывает устаревший прогресс из памяти.
+            # Перечитываем settings.json — ридер мог сохранить новые настройки
+            # (шрифт и др.), иначе следующий config.save() затрёт их старыми данными
+            try:
+                self.config.reload()
+            except Exception as e:
+                print(f"[App] config.reload() ошибка: {e}")
             self.config._positions = self.config._load_positions()
-            # Обновляем библиотеку только если она видима — иначе лишний reflow
             if self.library_window and self.library_window.isVisible():
                 self.library_window._on_library_updated()
 
@@ -858,7 +915,12 @@ class EbookReader:
     def run(self):
         def _on_quit():
             _remove_pid_file()
-            # Завершаем все живые читалки при закрытии главного процесса
+            # Перечитываем settings.json с диска — ридер мог изменить настройки
+            # в своём subprocess, и мы не должны перезаписать его изменения
+            try:
+                self.config.reload()
+            except Exception:
+                pass
             for _, proc in self._reader_procs:
                 if proc.poll() is None:
                     try:
@@ -871,7 +933,6 @@ class EbookReader:
 
 
 def main():
-    # --reader <book_path> — режим читалки (запускается как subprocess)
     if '--reader' in sys.argv:
         idx = sys.argv.index('--reader')
         if idx + 1 < len(sys.argv):
@@ -879,6 +940,10 @@ def main():
         else:
             print("Использование: NovaReader --reader <book_path>")
             sys.exit(1)
+    elif len(sys.argv) > 1 and not sys.argv[1].startswith('--'):
+        # Запуск через ассоциацию файлов: NovaReader book.epub
+        # Открываем напрямую читалку — без загрузки библиотеки
+        _run_reader_mode(sys.argv[1], from_association=True)
     else:
         app = EbookReader()
         sys.exit(app.run())

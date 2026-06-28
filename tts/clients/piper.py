@@ -180,6 +180,7 @@ class PiperClient(TTSClient):
             self.is_speaking = True
             self._sentence_callback = callback
             self.on_finish_callback = None
+            self._duration_callback = None  # сброс; будет установлен снаружи
 
         t = threading.Thread(target=self._speak_thread, args=(text,), daemon=True)
         self._speaking_thread = t
@@ -254,8 +255,26 @@ class PiperClient(TTSClient):
             # Проверяем PCM данные
             if stdout_data and len(stdout_data) > 100:
                 print(f"[Piper] PCM данных: {len(stdout_data)} байт")
+                # Точная длительность: читаем sample_rate из .onnx.json голоса
+                # Piper выдаёт raw PCM 16-bit mono с частотой из модели (обычно 22050)
+                piper_sr = 22050
+                try:
+                    import json as _json
+                    json_path = Path(str(voice_path) + '.json')
+                    if json_path.exists():
+                        _cfg = _json.loads(json_path.read_text(encoding='utf-8'))
+                        piper_sr = int(_cfg.get('audio', {}).get('sample_rate', 22050))
+                except Exception:
+                    pass
+                duration_ms = int(len(stdout_data) / (piper_sr * 2) * 1000)
+                if self._duration_callback:
+                    try:
+                        self._duration_callback(duration_ms)
+                    except Exception as _de:
+                        print(f"[Piper] duration_callback error: {_de}")
                 # Отправляем PCM в AudioPlayer с is_last=True
                 player.play_chunk(stdout_data, is_last=True)
+                print(f"[Piper] PCM → AudioPlayer (duration={duration_ms}ms, sr={piper_sr})")
                 # НЕ вызываем _finish() здесь — callback вызовется из AudioPlayer!
             else:
                 print("[Piper] ERROR: PCM не получен")

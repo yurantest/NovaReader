@@ -8,6 +8,7 @@ from datetime import datetime
 
 
 class Config:
+    DEFAULT_FONT = 'Literata'  # шрифт по умолчанию — меняется один раз здесь
     """Менеджер конфигурации и библиотеки"""
 
     @staticmethod
@@ -51,7 +52,8 @@ class Config:
         self.positions_file = self.config_dir / 'positions.json'
         self.highlights_file = self.config_dir / 'highlights.json'
         self.notes_file = self.config_dir / 'notes.json'
-        self.bookmarks_file = self.config_dir / 'bookmarks.json'
+        self.bookmarks_file  = self.config_dir / 'bookmarks.json'
+        self.corrections_file = self.config_dir / 'corrections.json'
 
         # Директория для голосов
         self.voices_dir = self.config_dir / 'voices'
@@ -66,11 +68,19 @@ class Config:
         ]
 
         self._data = self._load()
+        # Чистим устаревшие ключи и сразу сохраняем если что-то убрали
+        removed = [k for k in self._OBSOLETE_KEYS if k in self._data]
+        if removed:
+            for k in removed:
+                del self._data[k]
+            self.save()
+            print(f"[Config] Устаревшие ключи удалены: {removed}")
         self._library = self._load_library()   # может запустить миграцию
         self._positions = self._load_positions()
         self._highlights = self._load_highlights()
         self._notes = self._load_notes()
         self._bookmarks = self._load_bookmarks()
+        self._corrections = self._load_corrections()
 
         # Путь к библиотеке (может быть изменен пользователем)
         self.library_path = Path(self.get('library_path', str(self.config_dir / 'books')))
@@ -80,6 +90,11 @@ class Config:
     def _normalize_path(path) -> str:
         """Приводит путь к единому формату: прямые слеши / (POSIX-стиль)"""
         return str(path).replace('\\', '/')
+
+    # Ключи удалённые из программы — чистятся автоматически при загрузке
+    _OBSOLETE_KEYS = {
+        'reader_font_heading',
+    }
 
     def _load(self) -> dict:
         """Загрузить настройки"""
@@ -99,6 +114,7 @@ class Config:
             'theme_text': '#5b4636',
             'font_size': 16,
             'line_height': 1.5,
+            'reader_font_family': Config.DEFAULT_FONT,
             'column_width': 500,
             'spread_mode': 'auto',
             'tts_rate': 1.0,
@@ -134,6 +150,286 @@ class Config:
         if key == 'library_path':
             self.library_path = Path(value)
             self.library_path.mkdir(parents=True, exist_ok=True)
+
+    def get_reader_fonts(self) -> List[str]:
+        """Возвращает популярные системные шрифты подходящие для чтения."""
+        try:
+            from PyQt6.QtGui import QFontDatabase
+            # Только шрифты подходящие для чтения — без иконочных, моноширинных и UI
+            exclude_keywords = [
+                'Material', 'Icons', 'Awesome', 'Symbol', 'Wingdings', 'Webdings',
+                'Dingbats', 'Emoji', 'Mono', 'Code', 'Courier', 'Console',
+                'Terminal', 'Typewriter', 'OCR', 'Barcode',
+            ]
+            all_families = QFontDatabase.families()
+            result = sorted(set(
+                f for f in all_families
+                if not any(kw.lower() in f.lower() for kw in exclude_keywords)
+            ))
+            return result if result else [Config.DEFAULT_FONT, 'Noto Sans', 'Roboto']
+        except Exception:
+            return [Config.DEFAULT_FONT, 'Noto Sans', 'Roboto']
+
+    _MONO_KW  = ['Mono','Code','Courier','Console','Terminal','Typewriter',
+                 'Fixed','Menlo','Fira','JetBrains','Source Code','Hack',
+                 'Inconsolata','Cascadia']
+    _SERIF_KW = ['Literata','Georgia','Times','Serif','Garamond','Palatino',
+                 'Cambria','Charter','Minion','Caslon','Baskerville','Noto Serif',
+                 'PT Serif','Merriweather','Bitter','Lora','Libre Baskerville',
+                 'Vollkorn','Playfair']
+    _SKIP_KW  = ['Material','Icons','Awesome','Symbol','Wingdings','Webdings',
+                 'Dingbats','Emoji','Barcode','OCR']
+
+    @classmethod
+    def classify_font(cls, family: str) -> str:
+        """Возвращает 'serif', 'sans' или 'mono'. Иконочные — 'skip'."""
+        if any(k.lower() in family.lower() for k in cls._SKIP_KW):
+            return 'skip'
+        if any(k.lower() in family.lower() for k in cls._MONO_KW):
+            return 'mono'
+        if any(k.lower() in family.lower() for k in cls._SERIF_KW):
+            return 'serif'
+        return 'sans'
+
+    # ── Внутренний парсер шрифтов (без Qt) ──────────────────────────────────
+
+    @staticmethod
+    @staticmethod
+    def _read_font_meta(path: Path) -> dict | None:
+        """
+        Читает метаданные TTF/OTF из бинарного заголовка.
+        Приоритеты: nameID=16 (Preferred Family) > nameID=1.
+        Читает name table целиком — без ограничения 32 KB.
+        """
+        import struct
+
+        def _name_str(data: bytes, *name_ids: int) -> str | None:
+            if len(data) < 6:
+                return None
+            try:
+                _fmt, count, string_off = struct.unpack('>HHH', data[:6])
+            except struct.error:
+                return None
+            best: dict[int, str] = {}
+            for i in range(count):
+                base = 6 + i * 12
+                rec = data[base: base + 12]
+                if len(rec) < 12:
+                    break
+                plat, _enc, _lang, nid, ln, off = struct.unpack('>HHHHHH', rec)
+                if nid not in name_ids:
+                    continue
+                raw = data[string_off + off: string_off + off + ln]
+                try:
+                    s = (raw.decode('utf-16-be') if plat == 3
+                         else raw.decode('mac_roman')).strip()
+                    if s and (nid not in best or plat == 3):
+                        best[nid] = s
+                except Exception:
+                    continue
+            for nid in name_ids:
+                if nid in best:
+                    return best[nid]
+            return None
+
+        try:
+            with open(path, 'rb') as fh:
+                header = fh.read(12)
+                if len(header) < 12:
+                    return None
+                num_tables = struct.unpack('>H', header[4:6])[0]
+                if num_tables == 0 or num_tables > 64:
+                    return None
+
+                tables: dict[str, tuple[int, int]] = {}
+                for _ in range(num_tables):
+                    rec = fh.read(16)
+                    if len(rec) < 16:
+                        break
+                    tag = rec[:4].decode('ascii', errors='replace')
+                    off, length = struct.unpack('>II', rec[8:16])
+                    tables[tag] = (off, length)
+
+                if 'name' not in tables:
+                    return None
+
+                # Читаем name table ЦЕЛИКОМ (не ограничиваем 32 KB)
+                name_off, name_len = tables['name']
+                fh.seek(name_off)
+                name_data = fh.read(name_len)
+
+                # nameID=16 = Preferred/Typographic Family (приоритет над nameID=1)
+                family = _name_str(name_data, 16, 1)
+                if not family:
+                    family = path.stem
+
+                # nameID=17 = Preferred Subfamily, nameID=2 = Subfamily
+                subfamily = _name_str(name_data, 17, 2) or 'Regular'
+                subfamily = subfamily.strip()
+
+                # OS/2 → usWeightClass
+                weight = 400
+                if 'OS/2' in tables:
+                    fh.seek(tables['OS/2'][0] + 4)
+                    wc = fh.read(2)
+                    if len(wc) == 2:
+                        weight = struct.unpack('>H', wc)[0]
+
+                sub = subfamily.lower()
+                if weight == 400:
+                    for kw, w in (('black', 900), ('extrabold', 800), ('heavy', 800),
+                                  ('semibold', 600), ('demibold', 600),
+                                  ('medium', 500), ('bold', 700),
+                                  ('light', 300), ('thin', 100)):
+                        if kw in sub:
+                            weight = w
+                            break
+
+                style = 'italic' if ('italic' in sub or 'oblique' in sub) else 'normal'
+
+                is_variable = False
+                wght_min, wght_max = weight, weight
+                if 'fvar' in tables:
+                    is_variable = True
+                    wght_min, wght_max = 100, 900
+                    try:
+                        fh.seek(tables['fvar'][0])
+                        fvar_h = fh.read(16)
+                        if len(fvar_h) >= 8:
+                            axes_off  = struct.unpack('>H', fvar_h[2:4])[0]
+                            axes_size = max(struct.unpack('>H', fvar_h[4:6])[0], 20)
+                            axis_cnt  = struct.unpack('>H', fvar_h[6:8])[0]
+                            fh.seek(tables['fvar'][0] + axes_off)
+                            for _ in range(axis_cnt):
+                                ax = fh.read(axes_size)
+                                if len(ax) < 20:
+                                    break
+                                if ax[:4] == b'wght':
+                                    mn = struct.unpack('>i', ax[4:8])[0] / 65536
+                                    mx = struct.unpack('>i', ax[12:16])[0] / 65536
+                                    wght_min, wght_max = int(mn), int(mx)
+                                    break
+                    except Exception:
+                        pass
+
+                # display_name — имя для пикера и для @font-face
+                # Regular/Italic/Oblique не дублируют название семейства
+                sub_clean = subfamily
+                if sub_clean.lower() in ('regular', ''):
+                    display_name = family
+                else:
+                    display_name = f'{family} {sub_clean}'
+
+                return {
+                    'family':       family,
+                    'display_name': display_name,
+                    'file':         path.name,
+                    'variable':     is_variable,
+                    'weight':       weight,
+                    'wght_min':     wght_min,
+                    'wght_max':     wght_max,
+                    'style':        style,
+                }
+        except Exception:
+            return None
+
+
+    @staticmethod
+    def _fonts_dir() -> Path:
+        import sys as _sys
+        if getattr(_sys, 'frozen', False):
+            return Path(_sys.executable).parent / 'ibc/fonts'
+        return Path(__file__).parent / 'ibc/fonts'
+
+    def get_fonts_base_url(self) -> str:
+        """
+        Возвращает абсолютный percent-encoded file:// URL папки fonts/.
+        QUrl.toString() раскодирует кириллицу обратно в Unicode — WebEngine
+        не может загрузить такой URL. Поэтому кодируем вручную через urllib.
+        """
+        import urllib.request
+        import sys as _sys
+        fonts_dir = self._fonts_dir()
+        path_str = str(fonts_dir)
+        # На Windows pathname2url добавляет '///' сам, на POSIX — нет
+        if _sys.platform == 'win32':
+            url = 'file:///' + urllib.request.pathname2url(path_str).lstrip('/')
+        else:
+            url = 'file://' + urllib.request.pathname2url(path_str)
+        # Гарантируем завершающий слэш
+        if not url.endswith('/'):
+            url += '/'
+        return url
+
+    # ── Публичные методы ─────────────────────────────────────────────────────
+
+    def get_user_fonts(self) -> List[str]:
+        """
+        Возвращает display_name каждого файла шрифта из fonts/ (без иконочных).
+        Каждая разновидность (Regular, Bold, Italic...) — отдельная запись.
+        """
+        exclude = ['Material Icons', 'MaterialIcons', 'Font Awesome',
+                   'Material Symbols']
+        supported = {'.ttf', '.otf', '.woff', '.woff2'}
+        fonts_dir = self._fonts_dir()
+        if not fonts_dir.exists():
+            return []
+
+        seen: set[str] = set()
+        result: list[str] = []
+        for f in sorted(fonts_dir.iterdir()):
+            if f.suffix.lower() not in supported:
+                continue
+            meta = self._read_font_meta(f)
+            if not meta:
+                continue
+            if any(ex in meta['family'] for ex in exclude):
+                continue
+            dn = meta['display_name']
+            if dn not in seen:
+                seen.add(dn)
+                result.append(dn)
+        return sorted(result)
+
+    def get_font_file_map(self) -> list:
+        """
+        Возвращает список записей @font-face — по одной на каждый файл.
+        Результат кэшируется; сбрасывается через invalidate_font_cache().
+        """
+        if hasattr(self, '_font_file_map_cache'):
+            return self._font_file_map_cache
+
+        exclude = ['Material Icons', 'MaterialIcons', 'Font Awesome',
+                   'Material Symbols']
+        supported = {'.ttf', '.otf', '.woff', '.woff2'}
+        fonts_dir = self._fonts_dir()
+        result: list = []
+
+        if fonts_dir.exists():
+            for f in sorted(fonts_dir.iterdir()):
+                if f.suffix.lower() not in supported:
+                    continue
+                meta = self._read_font_meta(f)
+                if not meta:
+                    continue
+                if any(ex in meta['family'] for ex in exclude):
+                    continue
+                result.append(meta)
+
+        self._font_file_map_cache = result
+        return result
+
+    def invalidate_font_cache(self):
+        """Сбрасывает кэш шрифтов (вызывается после импорта нового шрифта)."""
+        if hasattr(self, '_font_file_map_cache'):
+            del self._font_file_map_cache
+
+    def reload(self):
+        """Перечитывает settings.json с диска в память.
+        Используется главным процессом при выходе, чтобы не затереть
+        изменения сделанные subprocess'ом ридера."""
+        fresh = self._load()
+        self._data.update(fresh)
 
     def save(self):
         self.config_file.write_text(
@@ -416,6 +712,7 @@ class Config:
                 'progress':      pos_data.get('progress', 0),
                 'position':      pos_data.get('position'),
                 'last_read':     last_read,
+                'reading_status': pos_data.get('reading_status', ''),
                 # Все форматы книги: {fmt: file_path}
                 'formats':       {f: p for f, p in book.get('formats', {}).items() if p},
             }
@@ -546,6 +843,14 @@ class Config:
             self.save_library()
             self.save_positions()
         return changed
+
+    def update_reading_status(self, file_path: str, status: str):
+        """Устанавливает статус чтения: 'reading', 'finished' или ''."""
+        key = self._normalize_path(file_path)
+        if key not in self._positions:
+            self._positions[key] = {}
+        self._positions[key]['reading_status'] = status
+        self.save_positions()
 
     def update_progress(self, file_path: str, progress: float, position):
         """Обновить прогресс и позицию в positions.json."""
@@ -1132,6 +1437,52 @@ class Config:
         return None
 
     # ── резервное копирование ─────────────────────────────────────
+    def _load_corrections(self) -> dict:
+        """Загрузить замены произношения из corrections.json"""
+        if self.corrections_file.exists():
+            try:
+                return json.loads(self.corrections_file.read_text(encoding='utf-8'))
+            except Exception as e:
+                print(f'[Config] Ошибка загрузки corrections.json: {e}')
+        # Миграция из settings.json если там есть старые замены
+        migrated = {}
+        old_global = self._data.get('tts_corrections_global') or self._data.get('tts_corrections')
+        if old_global:
+            migrated['global'] = old_global
+        old_per_book = self._data.get('tts_corrections_per_book')
+        if old_per_book:
+            migrated['per_book'] = old_per_book
+        return migrated
+
+    def save_corrections(self):
+        """Сохранить замены произношения в corrections.json"""
+        try:
+            self.corrections_file.write_text(
+                json.dumps(self._corrections, indent=2, ensure_ascii=False),
+                encoding='utf-8'
+            )
+        except Exception as e:
+            print(f'[Config] Ошибка сохранения corrections.json: {e}')
+
+    def get_corrections_global(self) -> list:
+        return self._corrections.get('global', [])
+
+    def get_corrections_for_book(self, book_path: str) -> list:
+        return self._corrections.get('per_book', {}).get(book_path, [])
+
+    def set_corrections_global(self, corrections: list):
+        self._corrections['global'] = corrections
+        self.save_corrections()
+
+    def set_corrections_for_book(self, book_path: str, corrections: list):
+        if 'per_book' not in self._corrections:
+            self._corrections['per_book'] = {}
+        if corrections:
+            self._corrections['per_book'][book_path] = corrections
+        elif book_path in self._corrections.get('per_book', {}):
+            del self._corrections['per_book'][book_path]
+        self.save_corrections()
+
     def iter_backup_files(self):
         """Генератор (arc_name, abs_path) всех файлов резервной копии."""
         config_files = {
@@ -1140,7 +1491,8 @@ class Config:
             'config/positions.json':  self.positions_file,
             'config/highlights.json': self.highlights_file,
             'config/notes.json':      self.notes_file,
-            'config/bookmarks.json':  self.bookmarks_file,
+            'config/bookmarks.json':   self.bookmarks_file,
+            'config/corrections.json':  self.corrections_file,
         }
         for arc_name, src in config_files.items():
             if src.exists():
@@ -1214,6 +1566,7 @@ class Config:
             'config/highlights.json': self.highlights_file,
             'config/notes.json':      self.notes_file,
             'config/bookmarks.json':  self.bookmarks_file,
+            'config/corrections.json':  self.corrections_file,
             # обратная совместимость (старый формат без папки config/)
             'settings.json':   self.config_file,
             'library.json':    self.library_file,
@@ -1229,6 +1582,7 @@ class Config:
             'config/bookmarks.json',  'bookmarks.json',
             'config/highlights.json', 'highlights.json',
             'config/notes.json',      'notes.json',
+            'config/corrections.json',      'corrections.json',
         }
 
         with zipfile.ZipFile(src_path, 'r') as zf:

@@ -104,6 +104,7 @@ class EdgeClient(TTSClient):
             # (раньше дублировалось в on_finish_callback → двойной вызов)
             self._sentence_callback = callback
             self.is_speaking = True
+            self._duration_callback = None  # сброс; будет установлен снаружи
 
         print(f"[EdgeTTS] Озвучивание: {self.current_voice} | {text[:60]}")
         future = asyncio.run_coroutine_threadsafe(
@@ -159,8 +160,15 @@ class EdgeClient(TTSClient):
                 return
 
             if pcm_data and len(pcm_data) > 0:
+                # Точная длительность по PCM: 22050 Гц, 16-бит моно = 2 байта/сэмпл
+                duration_ms = int(len(pcm_data) / (22050 * 2) * 1000)
+                if self._duration_callback:
+                    try:
+                        self._duration_callback(duration_ms)
+                    except Exception as _de:
+                        print(f"[EdgeTTS] duration_callback error: {_de}")
                 player.play_chunk(pcm_data, is_last=True)
-                print("[EdgeTTS] Ждём callback из AudioPlayer...")
+                print(f"[EdgeTTS] Ждём callback из AudioPlayer (duration={duration_ms}ms)...")
             else:
                 print("[EdgeTTS]  PCM пуст → _on_audio_finished")
                 self._on_audio_finished()

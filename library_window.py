@@ -1,9 +1,9 @@
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QScrollArea, QGridLayout, QLabel,
                              QFileDialog, QMessageBox, QProgressDialog,
                              QFrame, QLineEdit, QMenu, QComboBox, QInputDialog)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint
-from PyQt6.QtGui import QPixmap, QAction
+from PyQt6.QtGui import QPixmap, QAction, QIcon
 from pathlib import Path
 import sys, shutil, json, re
 from book_parser import BookParser
@@ -28,6 +28,11 @@ _LIB_STRINGS = {
         'refresh':            'Обновить',
         'backup':             'Создать резервную копию',
         'restore':            'Восстановить из резервной копии',
+        'restore_url':        'Восстановить по ссылке',
+        'restore_url_prompt': 'Вставьте прямую ссылку на ZIP-архив резервной копии:',
+        'restore_url_title':  'Восстановить по ссылке',
+        'restore_url_download': 'Загрузка архива…',
+        'restore_url_error':  'Не удалось загрузить архив:\n{e}',
         'settings':           'Настройки',
         # Поиск и сортировка
         'search_placeholder': 'Поиск по названию, автору, серии...',
@@ -101,6 +106,38 @@ _LIB_STRINGS = {
         'cbr_no_extractor':   'Не удалось распаковать {name} — установите unrar, bsdtar или 7z',
         # Пустая библиотека
         'empty_lib':          'Библиотека пуста.\nДобавьте книги кнопкой «+».',
+        # Тулбар диалога файлов
+        'dlg_back':           'Назад',
+        'dlg_forward':        'Вперёд',
+        'dlg_up':             'На уровень выше',
+        'dlg_new_folder':     'Новая папка',
+        'dlg_view_list':      'Список',
+        'dlg_view_detail':    'Детали',
+        # Диалоги сохранения/открытия
+        'dlg_save_norm':      'Сохранить нормализованную книгу',
+        'dlg_filter_books':   'Книги (*{ext});;Все файлы (*.*)',
+        'dlg_save_notes':     'Сохранить заметки',
+        'dlg_filter_md':      'Markdown (*.md)',
+        'dlg_filter_txt':     'Текстовые файлы (*.txt)',
+        'dlg_save_backup':    'Сохранить резервную копию',
+        'dlg_filter_zip':     'ZIP-архив (*.zip);;Все файлы (*.*)',
+        'dlg_open_backup':    'Выбрать резервную копию',
+        'dlg_choose_file':    'Выбрать файл…',
+        'close':             'Закрыть',
+        'cancel':            'Отмена',
+        'drop_to_add':       'Перетащите книги для добавления',
+        'yes':               'Да',
+        'no':                'Нет',
+        'found_books':       'Найдено {n} книг. Добавить?',
+        'all_records_ok':    'Все записи актуальны.',
+        # Восстановление — список элементов
+        'restore_item_settings': 'Настройки программы',
+        'restore_item_lib':      'Список библиотеки + позиции чтения',
+        'restore_item_bookmarks':'Закладки',
+        'restore_item_highlights':'Выделения',
+        'restore_item_notes':    'Заметки',
+        'restore_item_books':    'Файлы книг',
+        'restore_item_covers':   'Обложки',
     },
     'en': {
         # Status bar
@@ -115,6 +152,11 @@ _LIB_STRINGS = {
         'refresh':            'Refresh',
         'backup':             'Create backup',
         'restore':            'Restore from backup',
+        'restore_url':        'Restore from URL',
+        'restore_url_prompt': 'Paste a direct link to the backup ZIP archive:',
+        'restore_url_title':  'Restore from URL',
+        'restore_url_download': 'Downloading archive…',
+        'restore_url_error':  'Failed to download archive:\n{e}',
         'settings':           'Settings',
         # Search and sort
         'search_placeholder': 'Search by title, author, series...',
@@ -188,6 +230,38 @@ _LIB_STRINGS = {
         'cbr_no_extractor':   'Could not extract {name} — install unrar, bsdtar or 7z',
         # Empty library
         'empty_lib':          'Library is empty.\nAdd books using the «+» button.',
+        # File dialog toolbar
+        'dlg_back':           'Back',
+        'dlg_forward':        'Forward',
+        'dlg_up':             'Up one level',
+        'dlg_new_folder':     'New folder',
+        'dlg_view_list':      'List',
+        'dlg_view_detail':    'Details',
+        # Save/open dialogs
+        'dlg_save_norm':      'Save normalized book',
+        'dlg_filter_books':   'Books (*{ext});;All files (*.*)',
+        'dlg_save_notes':     'Save notes',
+        'dlg_filter_md':      'Markdown (*.md)',
+        'dlg_filter_txt':     'Text files (*.txt)',
+        'dlg_save_backup':    'Save backup',
+        'dlg_filter_zip':     'ZIP archive (*.zip);;All files (*.*)',
+        'dlg_open_backup':    'Select backup',
+        'dlg_choose_file':    'Choose file…',
+        'close':             'Close',
+        'cancel':            'Cancel',
+        'drop_to_add':       'Drop books here to add',
+        'yes':               'Yes',
+        'no':                'No',
+        'found_books':       'Found {n} books. Add them?',
+        'all_records_ok':    'All records are up to date.',
+        # Restore — item list
+        'restore_item_settings': 'App settings',
+        'restore_item_lib':      'Library list + reading positions',
+        'restore_item_bookmarks':'Bookmarks',
+        'restore_item_highlights':'Highlights',
+        'restore_item_notes':    'Notes',
+        'restore_item_books':    'Book files',
+        'restore_item_covers':   'Cover images',
     },
 }
 
@@ -219,7 +293,7 @@ DARK_THEME = {
 LIGHT_THEME = {
     "BG":       "#f5f5f5",
     "SURFACE":  "#ffffff",
-    "BORDER":   "#d0d0d0",
+    "BORDER":   "#c4c4c4",
     "ACCENT":   "#1a73e8",
     "TEXT":     "#1a1a1a",
     "SUB":      "#666666",
@@ -258,7 +332,15 @@ def _apply_theme_to_globals(colors: dict) -> None:
 
 def init_lib_colors(config) -> None:
     """Загрузить цвета библиотеки из конфига и применить к глобалам."""
-    name = config.get("library_theme_name", "dark")
+    name = config.get("library_theme_name", None)
+    # При первом запуске — определяем по системной теме
+    if name is None:
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QPalette
+        bg = QApplication.palette().color(QPalette.ColorGroup.Normal,
+                                          QPalette.ColorRole.Window)
+        name = "light" if bg.lightness() >= 128 else "dark"
+        config.set("library_theme_name", name)
     if name == "light":
         _apply_theme_to_globals(LIGHT_THEME)
     elif name == "custom":
@@ -269,7 +351,448 @@ def init_lib_colors(config) -> None:
         _apply_theme_to_globals(DARK_THEME)
 
 
-# Unicode fallback symbols if Material Icons not available
+def _make_styled_file_dialog(parent, title: str, start_dir: str,
+                              filter_str: str = '',
+                              multi: bool = False,
+                              mode: str = 'open',
+                              config=None) -> QFileDialog:
+    """
+    Создаёт QFileDialog в стиле NovaReader (не нативный).
+    mode: 'open'   — открыть файл(ы)
+          'save'   — сохранить файл
+          'folder' — выбрать папку
+    Возвращает настроенный диалог — вызывающий код делает .exec() сам.
+    """
+    dlg = QFileDialog(parent, title, start_dir, filter_str)
+    dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    if mode == 'save':
+        dlg.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dlg.setFileMode(QFileDialog.FileMode.AnyFile)
+    elif mode == 'folder':
+        dlg.setFileMode(QFileDialog.FileMode.Directory)
+        dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    else:
+        dlg.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)
+        dlg.setFileMode(
+            QFileDialog.FileMode.ExistingFiles if multi
+            else QFileDialog.FileMode.ExistingFile
+        )
+    dlg.setViewMode(QFileDialog.ViewMode.List)
+
+    # ── Стили ──────────────────────────────────────────────────────────────
+    radius   = "6px"
+    dlg.setStyleSheet(f"""
+        QFileDialog, QDialog {{
+            background: {BG};
+            color: {TEXT};
+            font-size: 14px;
+        }}
+        QLabel {{
+            color: {TEXT};
+            font-size: 13px;
+        }}
+        /* Боковая панель (места) */
+        QListView, QTreeView {{
+            background: {SURFACE};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: {radius};
+            outline: none;
+            font-size: 13px;
+        }}
+        QListView::item, QTreeView::item {{
+            padding: 4px 8px;
+            border-radius: 4px;
+        }}
+        QListView::item:selected, QTreeView::item:selected {{
+            background: {ACCENT};
+            color: #ffffff;
+        }}
+        QListView::item:hover, QTreeView::item:hover {{
+            background: rgba(255,255,255,0.07);
+        }}
+        /* Заголовок колонок */
+        QHeaderView::section {{
+            background: {TOOLBAR};
+            color: {TEXT};
+            border: none;
+            border-bottom: 1px solid {BORDER};
+            padding: 4px 8px;
+            font-size: 12px;
+        }}
+        /* Поле ввода имени файла */
+        QLineEdit {{
+            background: {SURFACE};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: {radius};
+            padding: 5px 8px;
+            font-size: 13px;
+            selection-background-color: {ACCENT};
+        }}
+        QLineEdit:focus {{
+            border-color: {ACCENT};
+        }}
+        /* Выпадающий список типов файлов */
+        QComboBox {{
+            background: {SURFACE};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: {radius};
+            padding: 4px 8px;
+            font-size: 13px;
+        }}
+        QComboBox:hover {{
+            border-color: {ACCENT};
+        }}
+        QComboBox::drop-down {{
+            border: none;
+            width: 20px;
+        }}
+        QComboBox QAbstractItemView {{
+            background: {SURFACE};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: {radius};
+            selection-background-color: {ACCENT};
+            selection-color: #ffffff;
+        }}
+        /* Кнопки */
+        QPushButton {{
+            background: {SURFACE};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: {radius};
+            padding: 6px 18px;
+            font-size: 13px;
+            min-width: 72px;
+        }}
+        QPushButton:hover {{
+            background: rgba(255,255,255,0.08);
+            border-color: {ACCENT};
+        }}
+        QPushButton:pressed {{
+            background: {ACCENT};
+            color: #ffffff;
+            border-color: {ACCENT};
+        }}
+        /* Кнопка Open/Открыть — акцентная */
+        QPushButton[text="Open"], QPushButton[text="Открыть"] {{
+            background: {ACCENT};
+            color: #ffffff;
+            border-color: {ACCENT};
+        }}
+        QPushButton[text="Open"]:hover, QPushButton[text="Открыть"]:hover {{
+            background: {ACCENT};
+            opacity: 0.9;
+        }}
+        /* Тулбар навигации */
+        QToolBar, QToolButton {{
+            background: {TOOLBAR};
+            color: {TEXT};
+            border: none;
+        }}
+        QToolButton:hover {{
+            background: rgba(255,255,255,0.08);
+            border-radius: 4px;
+        }}
+        /* Полосы прокрутки */
+        QScrollBar:vertical {{
+            background: {BG};
+            width: 8px;
+            border-radius: 4px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {BORDER};
+            border-radius: 4px;
+            min-height: 24px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: {ACCENT};
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0;
+        }}
+        QScrollBar:horizontal {{
+            background: {BG};
+            height: 8px;
+            border-radius: 4px;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {BORDER};
+            border-radius: 4px;
+            min-width: 24px;
+        }}
+        QScrollBar::handle:horizontal:hover {{
+            background: {ACCENT};
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+            width: 0;
+        }}
+        /* Метки «Look in:», «File name:» и т.п. */
+        QFileDialog QLabel {{
+            color: {TEXT};
+            font-size: 12px;
+        }}
+        /* Splitter между панелями */
+        QSplitter::handle {{
+            background: {BORDER};
+            width: 1px;
+        }}
+    """)
+    # Минимальный размер чтобы всё влезло красиво
+    dlg.resize(780, 520)
+
+    # ── Добавляем монтированные диски в боковую панель ────────────────────────
+    from PyQt6.QtCore import QUrl as _QUrl, QStorageInfo as _QSI
+    import sys as _sys, os as _os
+    _sidebar_urls = dlg.sidebarUrls()  # стандартные (Домашняя, Рабочий стол…)
+    _seen = {u.toLocalFile() for u in _sidebar_urls}
+
+    if _sys.platform == 'win32':
+        # Windows: C:, D:, E: и т.д. через QStorageInfo
+        for _vol in _QSI.mountedVolumes():
+            _path = _vol.rootPath()
+            if _vol.isValid() and _vol.isReady() and _path not in _seen:
+                _sidebar_urls.append(_QUrl.fromLocalFile(_path))
+                _seen.add(_path)
+    else:
+        # Linux: /media, /run/media, /mnt
+        for _mount_root in ('/media', '/run/media', '/mnt'):
+            if not _os.path.isdir(_mount_root):
+                continue
+            try:
+                for _user in _os.listdir(_mount_root):
+                    _user_path = _os.path.join(_mount_root, _user)
+                    if not _os.path.isdir(_user_path):
+                        continue
+                    _candidates = [_user_path]
+                    try:
+                        _candidates += [_os.path.join(_user_path, d)
+                                        for d in _os.listdir(_user_path)]
+                    except PermissionError:
+                        pass
+                    for _path in _candidates:
+                        if (_os.path.isdir(_path)
+                                and _os.path.ismount(_path)
+                                and _path not in _seen):
+                            _sidebar_urls.append(_QUrl.fromLocalFile(_path))
+                            _seen.add(_path)
+            except PermissionError:
+                pass
+
+    dlg.setSidebarUrls(_sidebar_urls)
+    # ───────────────────────────────────────────────────────────────────────
+
+    # ── Локализуем встроенные надписи QFileDialog ───────────────────────────
+    # Qt рисует «Look in:», «File name:», «Files of type:», «Open», «Cancel»
+    # по системной локали — переопределяем вручную под язык приложения.
+    from PyQt6.QtWidgets import QLabel as _QLabel, QPushButton as _QPBl
+    _lang = config.get('language', 'ru') if config else 'ru'
+    if _lang == 'ru':
+        # Qt добавляет амперсанды для хоткеев (&File name:)
+        # и иногда пробелы — проверяем все варианты
+        _lbl_map = {
+            'Look in:':        'Папка:',
+            '&Look in:':       'Папка:',
+            'File name:':      'Имя файла:',
+            '&File name:':     'Имя файла:',
+            'Files of type:':  'Тип файлов:',
+            '&Files of type:': 'Тип файлов:',
+            'Directory:':      'Папка:',
+            '&Directory:':     'Папка:',
+        }
+        _btn_map = {
+            'Open':    'Открыть',
+            '&Open':   'Открыть',
+            'Choose':  'Выбрать',
+            '&Choose': 'Выбрать',
+            'Save':    'Сохранить',
+            '&Save':   'Сохранить',
+            'Cancel':  'Отмена',
+            '&Cancel': 'Отмена',
+        }
+    else:
+        _lbl_map = {}  # уже на английском
+        _btn_map = {}
+
+    for lbl in dlg.findChildren(_QLabel):
+        raw = lbl.text()
+        # Проверяем и оригинал, и вариант без амперсанда
+        for key in (raw.rstrip(), raw.strip(), raw.replace('&', '').rstrip()):
+            if key in _lbl_map:
+                lbl.setText(_lbl_map[key])
+                break
+
+    def _retranslate_buttons():
+        for btn in dlg.findChildren(_QPBl):
+            raw = btn.text()
+            for key in (raw, raw.strip(), raw.replace('&', '').strip()):
+                if key in _btn_map:
+                    btn.setText(_btn_map[key])
+                    break
+
+    # Вызываем сразу — для Cancel/Choose
+    _retranslate_buttons()
+    # И через show — кнопка Open в QDialogButtonBox создаётся позже
+    dlg.show()
+    _retranslate_buttons()
+    # ───────────────────────────────────────────────────────────────────────
+
+    # ── Заменяем иконки тулбара на Material Icons ──────────────────────────
+    from PyQt6.QtGui import QFontDatabase, QFont
+    _has_mi = 'Material Icons' in QFontDatabase.families()
+    if _has_mi:
+        from PyQt6.QtWidgets import QToolButton
+        from PyQt6.QtGui import QIcon
+
+        # Тот же размер что в _mbtn(sz=36): font_size = sz // 2 = 18
+        _BTN_SZ   = 36
+        _FONT_SZ  = _BTN_SZ // 2          # 18px — как в библиотеке
+        _mi_font  = QFont('Material Icons', _FONT_SZ)
+
+        # objectName → (лигатура Material Icons, tooltip)
+        _cfg = config
+        _MI_MAP = {
+            'backButton':       ('arrow_back',          _ls(_cfg,'dlg_back')),
+            'forwardButton':    ('arrow_forward',        _ls(_cfg,'dlg_forward')),
+            'toParentButton':   ('arrow_upward',         _ls(_cfg,'dlg_up')),
+            'newFolderButton':  ('create_new_folder',    _ls(_cfg,'dlg_new_folder')),
+            'listModeButton':   ('view_list',            _ls(_cfg,'dlg_view_list')),
+            'detailModeButton': ('view_module',          _ls(_cfg,'dlg_view_detail')),
+        }
+
+        # Стиль идентичен _mbtn из library_window
+        _btn_style = (
+            f"QToolButton{{"
+            f"background:transparent;border:none;"
+            f"border-radius:{_BTN_SZ // 2}px;color:{SUB};"
+            f"font-family:'Material Icons';font-size:{_FONT_SZ}px;}}"
+            f"QToolButton:hover{{background:rgba(255,255,255,.08);color:{TEXT};}}"
+            f"QToolButton:pressed{{background:rgba(255,255,255,.15);}}"
+        )
+
+        for btn in dlg.findChildren(QToolButton):
+            name = btn.objectName()
+            if name not in _MI_MAP:
+                continue
+            ligature, tip = _MI_MAP[name]
+            btn.setIcon(QIcon())
+            btn.setText(ligature)
+            btn.setFont(_mi_font)
+            btn.setFixedSize(_BTN_SZ, _BTN_SZ)
+            btn.setToolTip(tip)
+            btn.setStyleSheet(_btn_style)
+    # ── Убираем иконки с кнопок Open/Cancel/Choose ─────────────────────────
+    from PyQt6.QtWidgets import QPushButton as _QPB
+    from PyQt6.QtGui import QIcon as _QIcon
+    for btn in dlg.findChildren(_QPB):
+        btn.setIcon(_QIcon())
+    # ───────────────────────────────────────────────────────────────────────
+
+    return dlg
+
+
+def _styled_get_open_filenames(parent, title, start_dir, filter_str, config=None) -> tuple:
+    """Styled замена QFileDialog.getOpenFileNames."""
+    dlg = _make_styled_file_dialog(parent, title, start_dir, filter_str, multi=True, mode='open', config=config)
+    if dlg.exec() == QFileDialog.DialogCode.Accepted:
+        return dlg.selectedFiles(), dlg.selectedNameFilter()
+    return [], ''
+
+
+def _styled_get_open_filename(parent, title, start_dir, filter_str, config=None) -> tuple:
+    """Styled замена QFileDialog.getOpenFileName."""
+    dlg = _make_styled_file_dialog(parent, title, start_dir, filter_str, multi=False, mode='open', config=config)
+    if dlg.exec() == QFileDialog.DialogCode.Accepted:
+        files = dlg.selectedFiles()
+        return (files[0] if files else ''), dlg.selectedNameFilter()
+    return '', ''
+
+
+def _styled_get_save_filename(parent, title, start_dir, filter_str,
+                               default_name: str = '', config=None) -> tuple:
+    """Styled замена QFileDialog.getSaveFileName."""
+    path = str(Path(start_dir) / default_name) if default_name else start_dir
+    dlg = _make_styled_file_dialog(parent, title, path, filter_str, mode='save', config=config)
+    if default_name:
+        dlg.selectFile(default_name)
+    if dlg.exec() == QFileDialog.DialogCode.Accepted:
+        files = dlg.selectedFiles()
+        return (files[0] if files else ''), dlg.selectedNameFilter()
+    return '', ''
+
+
+def _styled_get_existing_directory(parent, title, start_dir, config=None) -> str:
+    """Styled замена QFileDialog.getExistingDirectory."""
+    dlg = _make_styled_file_dialog(parent, title, start_dir, mode='folder', config=config)
+    if dlg.exec() == QFileDialog.DialogCode.Accepted:
+        files = dlg.selectedFiles()
+        return files[0] if files else ''
+    return ''
+
+
+def _apply_msgbox_style(mb):
+    """Применяет стиль NovaReader к любому QMessageBox: убирает иконки с кнопок,
+    красит фон/текст/кнопки под текущую тему библиотеки."""
+    from PyQt6.QtWidgets import QPushButton as _P
+    from PyQt6.QtGui import QIcon as _I
+    for btn in mb.findChildren(_P):
+        btn.setIcon(_I())
+    mb.setStyleSheet(f"""
+        QMessageBox {{
+            background: {BG};
+            color: {TEXT};
+        }}
+        QLabel {{
+            color: {TEXT};
+            font-size: 14px;
+        }}
+        QPushButton {{
+            background: {SURFACE};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 6px;
+            padding: 6px 16px;
+            font-size: 13px;
+            min-width: 0px;
+        }}
+        QPushButton:hover {{
+            border-color: {ACCENT};
+            background: rgba(255,255,255,0.08);
+        }}
+        QPushButton:pressed {{
+            background: {ACCENT};
+            color: #ffffff;
+            border-color: {ACCENT};
+        }}
+        QPushButton:default {{
+            border-color: {ACCENT};
+        }}
+    """)
+
+
+def _styled_question(parent, title: str, text: str, config=None) -> bool:
+    """
+    Styled замена QMessageBox.question с локализованными Да/Нет
+    и без иконок на кнопках. Возвращает True если пользователь нажал Да/Yes.
+    """
+    from PyQt6.QtWidgets import QMessageBox as _QMB
+    mb = _QMB(parent)
+    mb.setWindowTitle(title)
+    mb.setText(text)
+    mb.setStandardButtons(_QMB.StandardButton.Yes | _QMB.StandardButton.No)
+    mb.setDefaultButton(_QMB.StandardButton.No)
+    # Локализуем и убираем иконки
+    yes_text = _ls(config, 'yes') if config else 'Yes'
+    no_text  = _ls(config, 'no')  if config else 'No'
+    from PyQt6.QtGui import QIcon as _QIcon
+    mb.button(_QMB.StandardButton.Yes).setText(yes_text)
+    mb.button(_QMB.StandardButton.No).setText(no_text)
+    _apply_msgbox_style(mb)
+    return mb.exec() == _QMB.StandardButton.Yes
+
+
 _ICON_FALLBACK = {
     'add':          '+',
     'folder_open':  '⊞',
@@ -279,6 +802,8 @@ _ICON_FALLBACK = {
     'settings':     '',
     'backup':       '',
     'restore':      '',
+    'link':         '🔗',
+    'restore_url':  '🔗',
 }
 
 def _mbtn(icon_name, tooltip, sz=36):
@@ -318,6 +843,7 @@ class BookCard(QFrame):
 
     def _paint(self, hov):
         c, w = (ACCENT, 2) if hov else (BORDER, 1)
+        # На светлых темах добавляем лёгкую тень через outline чтобы карточки не сливались
         self.setStyleSheet(
             f"BookCard{{background:{SURFACE};border-radius:10px;border:{w}px solid {c};}}")
 
@@ -451,12 +977,12 @@ class BookCard(QFrame):
     def _delete_format(self, file_path, format_name):
         """Удалить конкретный формат книги. Папка и другие форматы остаются."""
         title = self.book_info.get("title", "Книга")[:40]
-        r = QMessageBox.question(
-            self, _ls(self.config, 'delete_fmt_title', fmt=format_name.upper()),
-            _ls(self.config, 'delete_fmt_msg',
-                title=title, fmt=format_name.upper()),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if r != QMessageBox.StandardButton.Yes:
+        if not _styled_question(
+                self,
+                _ls(self.config, 'delete_fmt_title', fmt=format_name.upper()),
+                _ls(self.config, 'delete_fmt_msg',
+                    title=title, fmt=format_name.upper()),
+                config=self.config):
             return
 
         try:
@@ -508,7 +1034,8 @@ class BookCard(QFrame):
 
         except Exception as e:
             print(f"[Library] Delete format error: {e}")
-            QMessageBox.warning(self, "Ошибка", f"Не удалось удалить файл:\n{e}")
+            _qmb = QMessageBox(QMessageBox.Icon.Warning, "Ошибка", f"Не удалось удалить файл:\n{e}", QMessageBox.StandardButton.Ok, self)
+            _apply_msgbox_style(_qmb); _qmb.exec()
 
         # Обновляем библиотеку
         parent = self.parent()
@@ -528,11 +1055,13 @@ class BookCard(QFrame):
         # Диалог выбора куда сохранить
         # Предлагаем имя с суффиксом _fixed
         default_name = src.stem + '_fixed' + ext
-        dst_str, _ = QFileDialog.getSaveFileName(
+        dst_str, _ = _styled_get_save_filename(
             self,
-            "Сохранить нормализованную книгу",
-            str(src.parent / default_name),
-            f"Книги (*{ext});;Все файлы (*.*)"
+            _ls(self.config, 'dlg_save_norm'),
+            str(src.parent),
+            _ls(self.config, 'dlg_filter_books', ext=ext),
+            default_name=default_name,
+            config=self.config
         )
         if not dst_str:
             return  # пользователь отменил
@@ -615,7 +1144,7 @@ class BookCard(QFrame):
     def _convert_book(self, file_path: str):
         """Конвертировать FB2 → EPUB через fb2c."""
         from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
-                                     QLabel, QPushButton, QTextEdit)
+                                     QLabel, QPushButton, QTextEdit, QFrame)
         from PyQt6.QtCore import QThread
         from PyQt6.QtCore import pyqtSignal as _Signal
 
@@ -652,6 +1181,7 @@ class BookCard(QFrame):
                 QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
             warn.button(QMessageBox.StandardButton.Ok).setText("Продолжить")
             warn.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
+            _apply_msgbox_style(warn)
             warn.setDefaultButton(QMessageBox.StandardButton.Cancel)
             if warn.exec() != QMessageBox.StandardButton.Ok:
                 return
@@ -676,37 +1206,66 @@ class BookCard(QFrame):
             Qt.WindowType.WindowTitleHint |
             Qt.WindowType.WindowCloseButtonHint)
         dlg.setWindowTitle(" Конвертация FB2 → EPUB")
-        dlg.setMinimumSize(500, 320)
+        dlg.setMinimumSize(500, 340)
         dlg.setStyleSheet(
-            f"QDialog{{background:{BG};color:{TEXT};}}"
-            f"QLabel{{color:{TEXT};}}"
-            f"QPushButton{{background:{ACCENT};color:white;border:none;"
-            f"padding:8px 20px;border-radius:6px;font-size:13px;}}"
-            f"QPushButton:disabled{{background:#444;color:#888;}}")
+            f"QDialog{{background:{BG};color:{TEXT};"
+            f"font-family:'Segoe UI','SF Pro Text','Helvetica Neue',sans-serif;}}"
+            f"QLabel{{color:{TEXT};background:transparent;}}"
+            f"QTextEdit{{background:{SURFACE};color:{TEXT};"
+            f"border:1px solid {BORDER};border-radius:8px;"
+            f"font-family:monospace;font-size:12px;padding:6px;}}"
+            f"QPushButton{{background:{SURFACE};color:{TEXT};"
+            f"border:1px solid {BORDER};border-radius:6px;"
+            f"padding:7px 18px;font-size:13px;min-width:80px;}}"
+            f"QPushButton:hover{{border-color:{ACCENT};background:{BG};}}"
+            f"QPushButton:pressed{{background:{BG};}}"
+            f"QPushButton#accent{{background:{ACCENT};color:white;"
+            f"border:none;font-weight:600;}}"
+            f"QPushButton#accent:hover{{background:{ACCENT}dd;}}"
+            f"QPushButton#danger{{background:transparent;color:#e57373;"
+            f"border:1px solid #e57373;}}"
+            f"QPushButton#danger:hover{{background:rgba(229,115,115,0.1);}}"
+            f"QPushButton#success{{background:transparent;color:#81c784;"
+            f"border:1px solid #81c784;}}"
+            f"QPushButton#success:hover{{background:rgba(129,199,132,0.1);}}"
+            f"QPushButton#info{{background:transparent;color:{ACCENT};"
+            f"border:1px solid {ACCENT};}}"
+            f"QPushButton#info:hover{{background:rgba(26,115,232,0.1);}}"
+            f"QPushButton:disabled{{color:{SUB};border-color:{BORDER};"
+            f"background:transparent;}}")
         lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(12)
 
-        lay.addWidget(QLabel(f"<b>{src.name}</b> → EPUB"))
+        title_lbl = QLabel(f"<b>{src.name}</b>  →  EPUB")
+        title_lbl.setStyleSheet(f"font-size:14px;color:{TEXT};")
+        lay.addWidget(title_lbl)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"background:{BORDER};max-height:1px;")
+        lay.addWidget(sep)
+
         log_box = QTextEdit()
         log_box.setReadOnly(True)
-        log_box.setStyleSheet(
-            "background:#1a1a2a;color:#c8ffc8;border:1px solid #333;"
-            "border-radius:6px;font-family:monospace;font-size:12px;")
         lay.addWidget(log_box)
 
         stop_flag = [False]
         result_path: list[Path | None] = [None]
 
         btn_row = QHBoxLayout()
-        stop_btn  = QPushButton(" Отмена")
-        stop_btn.setStyleSheet("background:#7a2020;")
+        btn_row.setSpacing(8)
+        stop_btn  = QPushButton("Отмена")
+        stop_btn.setObjectName("danger")
         close_btn = QPushButton("Закрыть")
         close_btn.setEnabled(False)
-        open_btn  = QPushButton(" Открыть папку")
+        close_btn.setObjectName("accent")
+        open_btn  = QPushButton("Открыть папку")
         open_btn.setEnabled(False)
-        open_btn.setStyleSheet("background:#2d5a27;")
-        open_book_btn = QPushButton(" Открыть книгу")
+        open_btn.setObjectName("success")
+        open_book_btn = QPushButton("Открыть книгу")
         open_book_btn.setEnabled(False)
-        open_book_btn.setStyleSheet("background:#1a4a6a;")
+        open_book_btn.setObjectName("info")
         btn_row.addWidget(stop_btn)
         btn_row.addWidget(open_btn)
         btn_row.addStretch()
@@ -853,9 +1412,15 @@ class BookCard(QFrame):
         if cp and Path(cp).exists():
             px = QPixmap(cp)
             if not px.isNull():
+                # Масштабируем с заполнением всей области (без белых полос)
                 px = px.scaled(CARD_W - 16, 190,
-                               Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                                Qt.TransformationMode.SmoothTransformation)
+                # Обрезаем по центру если вышло больше нужного
+                if px.width() > CARD_W - 16 or px.height() > 190:
+                    x = (px.width()  - (CARD_W - 16)) // 2
+                    y = (px.height() - 190) // 2
+                    px = px.copy(x, y, CARD_W - 16, 190)
                 cov.setPixmap(px)
             else:
                 cov.setText("\U0001F4D6")
@@ -864,9 +1429,9 @@ class BookCard(QFrame):
         lay.addWidget(cov, alignment=Qt.AlignmentFlag.AlignCenter)
 
         tl = QLabel(self.book_info.get("title", "Без названия"))
-        tl.setWordWrap(True); tl.setMaximumHeight(40)
+        tl.setWordWrap(True); tl.setMaximumHeight(36)
         tl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tl.setStyleSheet(f"color:{TEXT};font-size:12px;font-weight:bold;")
+        tl.setStyleSheet(f"color:{TEXT};font-size:10px;font-weight:bold;")
         lay.addWidget(tl)
 
         al = QLabel(self.book_info.get("author", "Неизвестен"))
@@ -894,6 +1459,34 @@ class BookCard(QFrame):
         lay.addStretch()
 
         p = self.book_info.get("progress", 0)
+
+        # ── Статус + процент ──────────────────────────────────────────────────
+        if p and p > 0:
+            sr_w = QWidget(); sr_w.setStyleSheet("background:transparent;")
+            sr = QHBoxLayout(sr_w)
+            sr.setContentsMargins(4, 0, 4, 2)
+            sr.setSpacing(4)
+
+            if p >= 0.95:
+                # Прочитано — зелёный маркер
+                st = QLabel("Прочитано")
+                st.setStyleSheet(
+                    "color:#1b5e20;font-size:9px;font-weight:bold;"
+                    "background:#a5d6a7;border-radius:3px;padding:1px 5px;")
+            else:
+                # Читаю — оранжевый маркер
+                st = QLabel("Читаю")
+                st.setStyleSheet(
+                    "color:#bf360c;font-size:9px;font-weight:bold;"
+                    "background:#ffcc80;border-radius:3px;padding:1px 5px;")
+            sr.addWidget(st)
+            sr.addStretch()
+            pct = QLabel(f"{int(round(p * 100))}%")
+            pct.setStyleSheet(f"color:{TEXT};font-size:10px;font-weight:bold;background:transparent;")
+            sr.addWidget(pct)
+            lay.addWidget(sr_w)
+
+        # Полоса прогресса
         if p and p > 0:
             bg = QFrame(); bg.setFixedHeight(3)
             bg.setStyleSheet(f"background:{BORDER};border-radius:2px;")
@@ -901,6 +1494,41 @@ class BookCard(QFrame):
             fill.setFixedWidth(max(4, int((CARD_W - 16) * min(p, 1.0))))
             fill.setStyleSheet(f"background:{PROGRESS};border-radius:2px;")
             lay.addWidget(bg)
+
+
+def _combo_style():
+    """Единый стиль для QComboBox — плоский, без системных стрелок."""
+    return (
+        f"QComboBox{{"
+        f"background:{BG};color:{TEXT};"
+        f"border:1px solid {BORDER};border-radius:17px;"
+        f"padding:0 36px 0 14px;font-size:13px;}}"
+        # Убираем системную кнопку drop-down
+        f"QComboBox::drop-down{{"
+        f"subcontrol-origin:padding;subcontrol-position:right center;"
+        f"width:28px;border:none;border-radius:0 17px 17px 0;}}"
+        # Рисуем собственную стрелку — маленький треугольник цвета SUB
+        f"QComboBox::down-arrow{{"
+        f"image:none;"
+        f"border-left:4px solid transparent;"
+        f"border-right:4px solid transparent;"
+        f"border-top:5px solid {SUB};"
+        f"margin-right:8px;}}"
+        f"QComboBox:hover::down-arrow{{border-top-color:{TEXT};}}"
+        f"QComboBox:focus{{border-color:{ACCENT};}}"
+        f"QComboBox:on::down-arrow{{"
+        f"border-top:none;"
+        f"border-bottom:5px solid {ACCENT};"
+        f"border-left:4px solid transparent;"
+        f"border-right:4px solid transparent;}}"
+        # Выпадающий список
+        f"QComboBox QAbstractItemView{{"
+        f"background:{BG};color:{TEXT};"
+        f"border:1px solid {BORDER};border-radius:8px;"
+        f"selection-background-color:{ACCENT};"
+        f"selection-color:white;"
+        f"padding:4px;outline:none;}}"
+    )
 
 
 class LibraryWindow(QMainWindow):
@@ -920,6 +1548,7 @@ class LibraryWindow(QMainWindow):
         self._all_books = []
         self.setStyleSheet(f"QMainWindow{{background:{BG};}}")
         self.setWindowTitle("NovaReader")
+        self.setMinimumSize(900, 600)
         self.resize(config.get("library_width", 1200),
                     config.get("library_height", 800))
         self._setup_ui()
@@ -932,6 +1561,9 @@ class LibraryWindow(QMainWindow):
         root = QVBoxLayout(self._central_widget)
         root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
         root.addWidget(self._make_toolbar())
+
+        # Разрешаем принимать файлы перетаскиванием
+        self.setAcceptDrops(True)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -974,8 +1606,9 @@ class LibraryWindow(QMainWindow):
         self.export_btn   = _mbtn("content_copy", _ls(self.config, 'export_notes'))
         self.refresh_btn  = _mbtn("refresh",      _ls(self.config, 'refresh'))
         self.backup_btn   = _mbtn("backup",       _ls(self.config, 'backup'))
-        self.restore_btn  = _mbtn("restore",      _ls(self.config, 'restore'))
-        self.settings_btn = _mbtn("settings",     _ls(self.config, 'settings'))
+        self.restore_btn     = _mbtn("restore",     _ls(self.config, 'restore'))
+        self.restore_url_btn = _mbtn("link",        _ls(self.config, 'restore_url'))
+        self.settings_btn    = _mbtn("settings",    _ls(self.config, 'settings'))
 
         self.add_btn.clicked.connect(self.add_books)
         self.scan_btn.clicked.connect(self.scan_folder)
@@ -984,6 +1617,7 @@ class LibraryWindow(QMainWindow):
         self.refresh_btn.clicked.connect(self._load_books)
         self.backup_btn.clicked.connect(self.backup_config)
         self.restore_btn.clicked.connect(self.restore_config)
+        self.restore_url_btn.clicked.connect(self.restore_from_url)
         self.settings_btn.clicked.connect(self.open_settings)
 
         self._toolbar_seps = []
@@ -1005,6 +1639,7 @@ class LibraryWindow(QMainWindow):
         # Бэкап / восстановление
         lay.addWidget(self.backup_btn)
         lay.addWidget(self.restore_btn)
+        lay.addWidget(self.restore_url_btn)
 
         lay.addWidget(_sep())
 
@@ -1033,12 +1668,8 @@ class LibraryWindow(QMainWindow):
             _ls(self.config, 'sort_title'),
             _ls(self.config, 'sort_author'),
         ])
-        self.sort_combo.setFixedSize(180, 34)
-        self.sort_combo.setStyleSheet(
-            f"QComboBox{{background:{BG};color:{TEXT};"
-            f"border:1px solid {BORDER};border-radius:17px;"
-            f"padding:0 14px;font-size:13px;}}"
-            f"QComboBox:focus{{border:1px solid {ACCENT};}}")
+        self.sort_combo.setFixedSize(200, 34)
+        self.sort_combo.setStyleSheet(_combo_style())
         self.sort_combo.currentTextChanged.connect(self._on_sort_changed)
         lay.addWidget(self.sort_combo)
 
@@ -1049,12 +1680,8 @@ class LibraryWindow(QMainWindow):
             "EPUB", "FB2", "PDF", "MOBI", "CBZ",
             _ls(self.config, 'filter_comics'),
         ])
-        self.format_filter.setFixedSize(140, 34)
-        self.format_filter.setStyleSheet(
-            f"QComboBox{{background:{BG};color:{TEXT};"
-            f"border:1px solid {BORDER};border-radius:17px;"
-            f"padding:0 14px;font-size:13px;}}"
-            f"QComboBox:focus{{border:1px solid {ACCENT};}}")
+        self.format_filter.setFixedSize(160, 34)
+        self.format_filter.setStyleSheet(_combo_style())
         self.format_filter.currentTextChanged.connect(self._on_filter_changed)
         lay.addWidget(self.format_filter)
 
@@ -1071,6 +1698,8 @@ class LibraryWindow(QMainWindow):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         QTimer.singleShot(0, self._reflow)
+        if hasattr(self, '_drop_overlay') and self._drop_overlay and self._drop_overlay.isVisible():
+            self._drop_overlay.setGeometry(self._central_widget.rect())
 
     def _cols(self):
         avail = self.books_container.width() - 32
@@ -1262,17 +1891,18 @@ class LibraryWindow(QMainWindow):
             btn_can = mb.addButton(
                 _ls(self.config, 'delete_btn_cancel'),
                 QMessageBox.ButtonRole.RejectRole)
+            _apply_msgbox_style(mb)
             mb.exec()
             clicked = mb.clickedButton()
             if clicked == btn_can or clicked is None:
                 return
             delete_all = (clicked == btn_all)
         else:
-            r = QMessageBox.question(
-                self, _ls(self.config, 'delete_title'),
-                _ls(self.config, 'delete_msg_single', title=title),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if r != QMessageBox.StandardButton.Yes:
+            if not _styled_question(
+                    self,
+                    _ls(self.config, 'delete_title'),
+                    _ls(self.config, 'delete_msg_single', title=title),
+                    config=self.config):
                 return
             delete_all = True
 
@@ -1332,8 +1962,10 @@ class LibraryWindow(QMainWindow):
 
         except Exception as e:
             print(f"[Library] Delete error: {e}")
-            QMessageBox.warning(self, "Ошибка",
-                                f"Не удалось удалить файлы:\n{e}")
+            _qmb = QMessageBox(QMessageBox.Icon.Warning, "Ошибка",
+                               f"Не удалось удалить файлы:\n{e}",
+                               QMessageBox.StandardButton.Ok, self)
+            _apply_msgbox_style(_qmb); _qmb.exec()
 
         # Удаляем обложку из кэша только при полном удалении
         if delete_all:
@@ -1346,14 +1978,25 @@ class LibraryWindow(QMainWindow):
 
     # ── добавление ────────────────────────────────────────────
     def add_books(self):
-        files, selected_filter = QFileDialog.getOpenFileNames(
-            self, _ls(self.config, 'add_dialog_title'),
-            str(self.config.get_library_path()),
+        filter_str = (
             f"{_ls(self.config,'add_filter_books')};;"
             f"{_ls(self.config,'add_filter_comics')};;"
             f"{_ls(self.config,'add_filter_manga')};;"
             f"{_ls(self.config,'add_filter_pdf')};;"
-            f"{_ls(self.config,'add_filter_all')}")
+            f"{_ls(self.config,'add_filter_all')}"
+        )
+        dlg = _make_styled_file_dialog(
+            self,
+            _ls(self.config, 'add_dialog_title'),
+            str(self.config.get_library_path()),
+            filter_str,
+            multi=True,
+            config=self.config,
+        )
+        if dlg.exec() != QFileDialog.DialogCode.Accepted:
+            return
+        files = dlg.selectedFiles()
+        selected_filter = dlg.selectedNameFilter()
         if not files:
             return
         if _ls(self.config, 'add_filter_manga') in selected_filter:
@@ -1365,21 +2008,24 @@ class LibraryWindow(QMainWindow):
         self._process_books(files, comic_type=comic_type)
 
     def scan_folder(self):
-        folder = QFileDialog.getExistingDirectory(
+        folder = _styled_get_existing_directory(
             self, _ls(self.config, 'scan_dialog_title'),
-            str(self.config.get_library_path()))
+            str(self.config.get_library_path()),
+            config=self.config)
         if not folder: return
         books = []
         for ext in ["*.epub", "*.fb2", "*.fb2.zip", "*.zip", "*.mobi", "*.cbz", "*.pdf"]:
             books.extend(Path(folder).rglob(ext))
         if not books:
-            QMessageBox.information(self, _ls(self.config, 'add_done'),
-                                    _ls(self.config, 'no_books_found')); return
-        r = QMessageBox.question(
-            self, _ls(self.config, 'scan_dialog_title'),
-            f"Найдено {len(books)} книг. Добавить?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if r == QMessageBox.StandardButton.Yes:
+            _qmb = QMessageBox(QMessageBox.Icon.Information, _ls(self.config, 'add_done'),
+                               _ls(self.config, 'no_books_found'),
+                               QMessageBox.StandardButton.Ok, self)
+            _apply_msgbox_style(_qmb); _qmb.exec(); return
+        if _styled_question(
+                self,
+                _ls(self.config, 'scan_dialog_title'),
+                _ls(self.config, 'found_books', n=len(books)),
+                config=self.config):
             self._process_books([str(b) for b in books])
 
     def cleanup_library(self):
@@ -1387,13 +2033,15 @@ class LibraryWindow(QMainWindow):
         miss  = [b for b in books
                  if not (b.get("file_path") and Path(b["file_path"]).exists())]
         if not miss:
-            QMessageBox.information(self, _ls(self.config, 'add_done'),
-                                    "Все записи актуальны."); return
-        r = QMessageBox.question(
-            self, _ls(self.config, 'cleanup'),
-            _ls(self.config, 'cleanup_confirm', n=len(miss)),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if r == QMessageBox.StandardButton.Yes:
+            _qmb = QMessageBox(QMessageBox.Icon.Information, _ls(self.config, 'add_done'),
+                               _ls(self.config, 'all_records_ok'),
+                               QMessageBox.StandardButton.Ok, self)
+            _apply_msgbox_style(_qmb); _qmb.exec(); return
+        if _styled_question(
+                self,
+                _ls(self.config, 'cleanup'),
+                _ls(self.config, 'cleanup_confirm', n=len(miss)),
+                config=self.config):
             self.config.cleanup_missing()
             self._load_books()
 
@@ -1407,13 +2055,10 @@ class LibraryWindow(QMainWindow):
         )
         
         if not has_data:
-            QMessageBox.information(
-                self, "Экспорт заметок",
-                "Нет заметок или выделенных цитат для экспорта.\n\n"
-                "Вы можете выделять текст в читалке и добавлять заметки,\n"
-                "а затем экспортировать их через это меню."
-            )
-            return
+            _qmb = QMessageBox(QMessageBox.Icon.Information, "Экспорт заметок",
+                               "Нет заметок для экспорта.",
+                               QMessageBox.StandardButton.Ok, self)
+            _apply_msgbox_style(_qmb); _qmb.exec(); return
         
         # Диалог выбора формата
         from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QRadioButton, QVBoxLayout, QLabel
@@ -1464,13 +2109,15 @@ class LibraryWindow(QMainWindow):
         
         # Диалог сохранения файла
         default_name = "notes.md" if use_markdown else "notes.txt"
-        filter_str = "Markdown (*.md)" if use_markdown else "Text files (*.txt)"
+        filter_str = _ls(self.config, 'dlg_filter_md') if use_markdown else _ls(self.config, 'dlg_filter_txt')
         
-        file_path, _ = QFileDialog.getSaveFileName(
+        file_path, _ = _styled_get_save_filename(
             self,
-            "Сохранить заметки",
-            str(self.config.get_library_path() / default_name),
-            filter_str
+            _ls(self.config, 'dlg_save_notes'),
+            str(self.config.get_library_path()),
+            filter_str,
+            default_name=default_name,
+            config=self.config
         )
         
         if not file_path:
@@ -1483,26 +2130,24 @@ class LibraryWindow(QMainWindow):
             else:
                 count = self.config.export_notes_to_txt(file_path)
             
-            QMessageBox.information(
-                self,
-                "Экспорт завершён",
-                f" Заметки успешно экспортированы!\n\n"
-                f" Экспортировано книг: {count}\n"
-                f" Файл сохранён:\n{file_path}"
-            )
+            _qmb = QMessageBox(QMessageBox.Icon.Information, "Экспорт завершён",
+                               f"Заметки экспортированы.\nКниг: {count}\nФайл: {file_path}",
+                               QMessageBox.StandardButton.Ok, self)
+            _apply_msgbox_style(_qmb); _qmb.exec()
         except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Ошибка экспорта",
-                f" Не удалось экспортировать заметки:\n{e}"
-            )
+            _qmb = QMessageBox(QMessageBox.Icon.Critical, "Ошибка экспорта",
+                               f"Не удалось экспортировать заметки:\n{e}",
+                               QMessageBox.StandardButton.Ok, self)
+            _apply_msgbox_style(_qmb); _qmb.exec()
 
     def _process_books(self, file_paths, comic_type=None):
         expanded = []
         for fp in file_paths: expanded.extend(self._expand_file(fp))
         if not expanded:
-            QMessageBox.warning(self, _ls(self.config, 'error'),
-                                _ls(self.config, 'no_books_found')); return
+            _qmb = QMessageBox(QMessageBox.Icon.Warning, _ls(self.config, 'error'),
+                               _ls(self.config, 'no_books_found'),
+                               QMessageBox.StandardButton.Ok, self)
+            _apply_msgbox_style(_qmb); _qmb.exec(); return
         prog = QProgressDialog(
             _ls(self.config, 'add_progress'),
             _ls(self.config, 'add_cancel'),
@@ -1545,8 +2190,11 @@ class LibraryWindow(QMainWindow):
                 if tmp_cleanup and Path(tmp_cleanup).exists():
                     shutil.rmtree(tmp_cleanup, ignore_errors=True)
         prog.setValue(len(expanded))
-        QMessageBox.information(self, _ls(self.config, 'add_done'),
-                                _ls(self.config, 'add_result', added=added, skipped=skipped))
+        prog.close()  # закрываем прогресс до показа уведомления
+        _qmb = QMessageBox(QMessageBox.Icon.Information, _ls(self.config, 'add_done'),
+                           _ls(self.config, 'add_result', added=added, skipped=skipped),
+                           QMessageBox.StandardButton.Ok, self)
+        _apply_msgbox_style(_qmb); _qmb.exec()
         self._load_books()
 
     def _expand_file(self, file_path):
@@ -1807,7 +2455,7 @@ class LibraryWindow(QMainWindow):
 
         for btn in (getattr(self, n, None) for n in (
                 "add_btn", "scan_btn", "cleanup_btn", "export_btn",
-                "refresh_btn", "backup_btn", "restore_btn", "settings_btn")):
+                "refresh_btn", "backup_btn", "restore_btn", "restore_url_btn", "settings_btn")):
             if btn:
                 btn.setStyleSheet(
                     f"QPushButton{{background:transparent;border:none;"
@@ -1816,11 +2464,7 @@ class LibraryWindow(QMainWindow):
                     f"QPushButton:hover{{background:rgba(128,128,128,.12);color:{TEXT};}}"
                     f"QPushButton:pressed{{background:rgba(128,128,128,.22);}}")
 
-        combo_ss = (
-            f"QComboBox{{background:{BG};color:{TEXT};"
-            f"border:1px solid {BORDER};border-radius:17px;"
-            f"padding:0 14px;font-size:13px;}}"
-            f"QComboBox:focus{{border:1px solid {ACCENT};}}")
+        combo_ss = _combo_style()
         for w in (getattr(self, n, None) for n in
                   ("search_box", "sort_combo", "format_filter")):
             if w:
@@ -1883,14 +2527,18 @@ class LibraryWindow(QMainWindow):
             f"Размер: <b>~{_fmt_size(total_bytes)}</b>")
         info.setStandardButtons(
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
-        info.button(QMessageBox.StandardButton.Ok).setText("Выбрать файл…")
+        info.button(QMessageBox.StandardButton.Ok).setText(_ls(self.config, 'dlg_choose_file'))
+        info.button(QMessageBox.StandardButton.Cancel).setText(_ls(self.config, 'cancel'))
+        _apply_msgbox_style(info)
         if info.exec() != QMessageBox.StandardButton.Ok:
             return
 
-        dest, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить резервную копию",
-            str(Path.home() / default_name),
-            "ZIP-архив (*.zip);;Все файлы (*.*)")
+        dest, _ = _styled_get_save_filename(
+            self, _ls(self.config, 'dlg_save_backup'),
+            str(Path.home()),
+            _ls(self.config, 'dlg_filter_zip'),
+            default_name=default_name,
+            config=self.config)
         if not dest:
             return
 
@@ -1968,22 +2616,23 @@ class LibraryWindow(QMainWindow):
 
         def on_done(result):
             dlg.accept()
+            cancel_btn.setText(_ls(self.config, 'close') if hasattr(self, 'config') else 'Закрыть')
             if result.get('cancelled'):
                 # Удаляем неполный архив
                 try:
                     Path(dest).unlink(missing_ok=True)
                 except Exception:
                     pass
-                QMessageBox.warning(self, "Отменено",
-                                    "Создание резервной копии отменено.\n"
-                                    "Неполный архив удалён.")
+                _qmb = QMessageBox(QMessageBox.Icon.Warning, "Отменено",
+                                   "Создание резервной копии отменено.\nНеполный архив удалён.",
+                                   QMessageBox.StandardButton.Ok, self)
+                _apply_msgbox_style(_qmb); _qmb.exec()
             else:
                 sz = Path(dest).stat().st_size
-                QMessageBox.information(
-                    self, "Резервная копия создана",
-                    f" Архив сохранён:\n{dest}\n\n"
-                    f" Файлов: {result['files']}\n"
-                    f" Размер архива: {_fmt_size(sz)}")
+                _qmb = QMessageBox(QMessageBox.Icon.Information, "Резервная копия создана",
+                                   f"Архив сохранён:\n{dest}\n\nФайлов: {result['files']}\nРазмер: {_fmt_size(sz)}",
+                                   QMessageBox.StandardButton.Ok, self)
+                _apply_msgbox_style(_qmb); _qmb.exec()
 
         def on_error(msg):
             dlg.accept()
@@ -1991,8 +2640,10 @@ class LibraryWindow(QMainWindow):
                 Path(dest).unlink(missing_ok=True)
             except Exception:
                 pass
-            QMessageBox.critical(self, "Ошибка",
-                                 f"Не удалось создать резервную копию:\n{msg}")
+            _qmb = QMessageBox(QMessageBox.Icon.Critical, "Ошибка",
+                               f"Не удалось создать резервную копию:\n{msg}",
+                               QMessageBox.StandardButton.Ok, self)
+            _apply_msgbox_style(_qmb); _qmb.exec()
 
         worker.progress_sig.connect(on_progress)
         worker.done_sig.connect(on_done)
@@ -2003,17 +2654,22 @@ class LibraryWindow(QMainWindow):
         worker.wait()
 
     def restore_config(self):
+        """Выбрать ZIP-архив и восстановить из него."""
+        src, _ = _styled_get_open_filename(
+            self, _ls(self.config, 'dlg_open_backup'),
+            str(Path.home()),
+            _ls(self.config, 'dlg_filter_zip'),
+            config=self.config)
+        if not src:
+            return
+        self._restore_from_path(src)
+
+    def _restore_from_path(self, src: str):
         """Восстановить настройки, библиотеку, закладки и позиции из ZIP-архива."""
         import zipfile
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QProgressBar
         from PyQt6.QtCore import QThread
 
-        src, _ = QFileDialog.getOpenFileName(
-            self, "Выбрать резервную копию",
-            str(Path.home()),
-            "ZIP-архив (*.zip);;Все файлы (*.*)")
-        if not src:
-            return
 
         # Проверяем архив
         known_config = {"config/settings.json", "config/library.json",
@@ -2026,14 +2682,18 @@ class LibraryWindow(QMainWindow):
                 has_covers = any(n.startswith("covers/")  for n in names)
                 has_marker = "novareader_backup.marker" in names
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось открыть архив:\n{e}")
+            _qmb = QMessageBox(QMessageBox.Icon.Critical, "Ошибка",
+                               f"Не удалось открыть архив:\n{e}",
+                               QMessageBox.StandardButton.Ok, self)
+            _apply_msgbox_style(_qmb); _qmb.exec()
             return
 
         if not names & known_config:
-            QMessageBox.warning(
-                self, "Неверный архив",
-                "Архив не содержит файлов резервной копии NovaReader.\n"
-                "Выберите файл, созданный кнопкой «Создать резервную копию».")
+            _qmb = QMessageBox(QMessageBox.Icon.Warning, "Неверный архив",
+                               "Архив не содержит файлов резервной копии NovaReader.\n"
+                               "Выберите файл, созданный кнопкой «Создать резервную копию».",
+                               QMessageBox.StandardButton.Ok, self)
+            _apply_msgbox_style(_qmb); _qmb.exec()
             return
 
         def _fmt_size(b):
@@ -2046,23 +2706,25 @@ class LibraryWindow(QMainWindow):
         arc_size = Path(src).stat().st_size
 
         # Перечисляем что будет восстановлено
-        items = ["Настройки программы", "Список библиотеки + позиции чтения",
-                 "Закладки", "Выделения", "Заметки"]
+        items = [_ls(self.config, 'restore_item_settings'),
+                 _ls(self.config, 'restore_item_lib'),
+                 _ls(self.config, 'restore_item_bookmarks'),
+                 _ls(self.config, 'restore_item_highlights'),
+                 _ls(self.config, 'restore_item_notes')]
         if has_lib:
-            items.append("Файлы книг")
+            items.append(_ls(self.config, 'restore_item_books'))
         if has_covers:
-            items.append("Обложки")
+            items.append(_ls(self.config, 'restore_item_covers'))
 
-        r = QMessageBox.question(
-            self, "Восстановить из резервной копии",
-            "  <b>Текущие данные будут заменены!</b><br><br>"
-            "Будет восстановлено:<br>  • " +
-            "<br>  • ".join(items) +
-            f"<br><br>Файлов в архиве: <b>{total_arc}</b> · "
-            f"Размер: <b>{_fmt_size(arc_size)}</b><br><br>"
-            "Продолжить?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if r != QMessageBox.StandardButton.Yes:
+        if not _styled_question(
+                self, "Восстановить из резервной копии",
+                "  <b>Текущие данные будут заменены!</b><br><br>"
+                "Будет восстановлено:<br>  • " +
+                "<br>  • ".join(items) +
+                f"<br><br>Файлов в архиве: <b>{total_arc}</b> · "
+                f"Размер: <b>{_fmt_size(arc_size)}</b><br><br>"
+                "Продолжить?",
+                config=self.config):
             return
 
         # ── прогресс-диалог ───────────────────────────────────
@@ -2140,9 +2802,10 @@ class LibraryWindow(QMainWindow):
         def on_done(result):
             dlg.accept()
             if result.get('cancelled'):
-                QMessageBox.warning(self, "Отменено",
-                                    "Восстановление отменено.\n"
-                                    "Часть данных могла быть восстановлена частично.")
+                _qmb = QMessageBox(QMessageBox.Icon.Warning, "Отменено",
+                                   "Восстановление отменено.\nЧасть данных могла быть восстановлена частично.",
+                                   QMessageBox.StandardButton.Ok, self)
+                _apply_msgbox_style(_qmb); _qmb.exec()
             else:
                 remap_note = ''
                 if result.get('path_remapped'):
@@ -2160,19 +2823,32 @@ class LibraryWindow(QMainWindow):
                     f"   Файлов книг: {result['library_files']}<br>"
                     f"    Обложек: {result['cover_files']}"
                     + remap_note)
+                msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+                _apply_msgbox_style(msg)
+                msg.button(QMessageBox.StandardButton.Ok).setIcon(QIcon())
+                msg.button(QMessageBox.StandardButton.Ok).setText('OK')
                 msg.exec()
                 
                 # АВТОМАТИЧЕСКОЕ ОБНОВЛЕНИЕ БИБЛИОТЕКИ ПОСЛЕ ВОССТАНОВЛЕНИЯ
+                # Перечитываем конфиг и переприменяем тему
+                self.config.reload()
+                init_lib_colors(self.config)
+                self.apply_lib_theme(
+                    self.config.get('library_theme_name', 'dark'),
+                    self.config.get('library_theme_custom', None)
+                )
                 self._load_books()
                 # Принудительно пересканируем папку библиотеки
-               # QTimer.singleShot(500, self._auto_rescan_after_restore)
+                #QTimer.singleShot(500, self._auto_rescan_after_restore)
             
             dlg.accept()
 
         def on_error(msg):
             dlg.accept()
-            QMessageBox.critical(self, "Ошибка восстановления",
-                                 f"Не удалось восстановить данные:\n{msg}")
+            _qmb = QMessageBox(QMessageBox.Icon.Critical, "Ошибка восстановления",
+                               f"Не удалось восстановить данные:\n{msg}",
+                               QMessageBox.StandardButton.Ok, self)
+            _apply_msgbox_style(_qmb); _qmb.exec()
 
         def on_rescan_cancelled():
             # Если пользователь отменил сканирование, просто обновляем отображение
@@ -2186,6 +2862,209 @@ class LibraryWindow(QMainWindow):
         cancel_flag[0] = True
         worker.wait()
 
+    def _get_yandex_direct_link(self, url: str) -> str | None:
+        """Делегирует получение прямой ссылки модулю cloud_download."""
+        try:
+            from cloud_download import get_direct_link, detect_service
+            service = detect_service(url)
+            if service:
+                return get_direct_link(url)
+        except ImportError:
+            pass
+        return None
+
+    def restore_from_url(self):
+        """Скачать ZIP-архив резервной копии по URL и восстановить из него."""
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                      QLabel, QLineEdit, QPushButton,
+                                      QProgressDialog)
+        from PyQt6.QtCore import Qt
+
+        # ── Диалог ввода URL ────────────────────────────────────────────────
+        dlg = QDialog(self)
+        dlg.setWindowTitle(_ls(self.config, 'restore_url_title'))
+        dlg.setFixedWidth(520)
+        dlg.setStyleSheet(
+            f'QDialog{{background:{BG};color:{TEXT};}}'
+            f'QLabel{{color:{TEXT};font-size:13px;}}'
+            f'QLineEdit{{background:{SURFACE};color:{TEXT};'
+            f'border:1px solid {BORDER};border-radius:6px;'
+            f'padding:6px 10px;font-size:13px;}}'
+            f'QLineEdit:focus{{border-color:{ACCENT};}}'
+            f'QPushButton{{background:{SURFACE};color:{TEXT};'
+            f'border:1px solid {BORDER};border-radius:6px;'
+            f'padding:7px 18px;font-size:13px;min-width:0;}}'
+            f'QPushButton:hover{{border-color:{ACCENT};'
+            f'background:rgba(255,255,255,.08);}}'
+            f'QPushButton:pressed{{background:{ACCENT};'
+            f'color:#fff;border-color:{ACCENT};}}'
+        )
+
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(12)
+        lay.setContentsMargins(20, 20, 20, 16)
+
+        lay.addWidget(QLabel(_ls(self.config, 'restore_url_prompt')))
+
+        url_edit = QLineEdit()
+        url_edit.setPlaceholderText('https://...')
+        lay.addWidget(url_edit)
+
+        btn_row = QHBoxLayout()
+        btn_ok     = QPushButton(_ls(self.config, 'yes'))
+        btn_cancel = QPushButton(_ls(self.config, 'cancel'))
+        btn_ok.setStyleSheet(
+            f'QPushButton{{background:{ACCENT};color:#fff;'
+            f'border:1px solid {ACCENT};border-radius:6px;'
+            f'padding:7px 18px;font-size:13px;min-width:0;}}'
+        )
+        btn_row.addStretch()
+        btn_row.addWidget(btn_ok)
+        btn_row.addWidget(btn_cancel)
+        lay.addLayout(btn_row)
+
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+        url_edit.returnPressed.connect(dlg.accept)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        url = url_edit.text().strip()
+        if not url:
+            return
+
+        # ── Скачиваем архив ─────────────────────────────────────────────────
+        prog = QProgressDialog(
+            _ls(self.config, 'restore_url_download'),
+            _ls(self.config, 'cancel'), 0, 0, self)
+        prog.setWindowTitle(_ls(self.config, 'restore_url_title'))
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setValue(0)
+        prog.show()
+        QApplication.processEvents()
+
+        import tempfile, threading, os
+
+        # Сохраняем ZIP в домашнюю папку пользователя — гарантированно есть права
+        import os
+        if sys.platform == 'win32':
+            _base = Path(os.environ.get('LOCALAPPDATA', Path.home()))
+        else:
+            _base = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache'))
+        cache_dir = _base / 'NovaReader'
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            # Проверяем что можем писать
+            _test = cache_dir / '.write_test'
+            _test.touch(); _test.unlink()
+        except (PermissionError, OSError):
+            # Fallback — прямо в домашнюю папку
+            cache_dir = Path.home()
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix='.zip',
+                                             prefix='novareader_restore_',
+                                             dir=str(cache_dir))
+        os.close(tmp_fd)
+        print(f'[Restore] Временный файл: {tmp_path}')
+
+        # Определяем прямую ссылку для скачивания
+        raw_url = url
+        try:
+            from cloud_download import get_direct_link, detect_service
+            service = detect_service(raw_url)
+        except ImportError:
+            service = None
+
+        if service:
+            prog.setLabelText('Получаем прямую ссылку...')
+            QApplication.processEvents()
+            download_url = get_direct_link(raw_url)
+            if not download_url:
+                prog.close()
+                Path(tmp_path).unlink(missing_ok=True)
+                _qmb = QMessageBox(QMessageBox.Icon.Warning,
+                                   'Не удалось получить ссылку',
+                                   'Не удалось извлечь прямую ссылку для скачивания.\n\n'
+                                   'Попробуйте: откройте ссылку в браузере, нажмите «Скачать»,\n'
+                                   'остановите загрузку и скопируйте прямую ссылку.',
+                                   QMessageBox.StandardButton.Ok, self)
+                _apply_msgbox_style(_qmb); _qmb.exec()
+                return
+        else:
+            download_url = raw_url
+
+        prog.setLabelText(_ls(self.config, 'restore_url_download'))
+        QApplication.processEvents()
+
+        # Качаем через requests в отдельном потоке (как голоса Piper)
+        result  = [None]   # 'ok' | 'cancel' | Exception
+        cancel  = [False]
+
+        def _download():
+            try:
+                import requests as _req
+                r = _req.get(download_url, stream=True, timeout=60,
+                             headers={'User-Agent': 'Mozilla/5.0'})
+                r.raise_for_status()
+                # Проверяем что получили ZIP а не HTML страницу
+                ctype = r.headers.get('content-type', '')
+                if 'text/html' in ctype:
+                    result[0] = Exception('Сервер вернул HTML вместо файла.\n'
+                                          'Возможно ссылка устарела или требует авторизации.')
+                    return
+                total = int(r.headers.get('content-length', 0))
+                done  = 0
+                with open(tmp_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if cancel[0]:
+                            result[0] = 'cancel'
+                            return
+                        if chunk:
+                            f.write(chunk)
+                            done += len(chunk)
+                            # Сохраняем прогресс в переменную — главный поток обновит UI
+                            progress[0] = (done, total)
+                result[0] = 'ok'
+            except Exception as e:
+                result[0] = e
+
+        progress = [(0, 0)]  # (done, total) — обновляется из потока
+        t = threading.Thread(target=_download, daemon=True)
+        t.start()
+
+        from PyQt6.QtCore import QThread as _QThread
+        prog.canceled.connect(lambda: cancel.__setitem__(0, True))
+        while t.is_alive():
+            QApplication.processEvents()
+            # Обновляем прогресс-бар из главного потока
+            done, total = progress[0]
+            if total > 0:
+                prog.setMaximum(total)
+                prog.setValue(done)
+            _QThread.msleep(100)
+
+        prog.close()
+        if result[0] != 'ok':
+            Path(tmp_path).unlink(missing_ok=True)
+            if result[0] != 'cancel' and result[0] is not None:
+                _qmb = QMessageBox(QMessageBox.Icon.Critical,
+                                   _ls(self.config, 'error'),
+                                   _ls(self.config, 'restore_url_error', e=result[0]),
+                                   QMessageBox.StandardButton.Ok, self)
+                _apply_msgbox_style(_qmb); _qmb.exec()
+            return
+
+        # ── Передаём скачанный ZIP в обычное восстановление ─────────────────
+        # Подменяем диалог выбора файла — вызываем restore_config напрямую с путём
+        self._restore_from_path(tmp_path)
+
+        # Удаляем временный файл после восстановления
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
     def _auto_rescan_after_restore(self):
         """Автоматический скан папки после восстановления бэкапа"""
         folder = str(self.config.get_library_path())
@@ -2195,19 +3074,87 @@ class LibraryWindow(QMainWindow):
         
         if books:
             # Предлагаем пользователю добавить найденные книги
-            r = QMessageBox.question(
-                self,
-                "Сканирование после восстановления",
-                f"Найдено {len(books)} книг в папке библиотеки.\n\n"
-                "Добавить их в библиотеку?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if r == QMessageBox.StandardButton.Yes:
+            if _styled_question(
+                    self,
+                    "Сканирование после восстановления",
+                    f"Найдено {len(books)} книг в папке библиотеки.\n\nДобавить их в библиотеку?",
+                    config=self.config):
                 self._process_books([str(b) for b in books])
         else:
             self._load_books()
 
+    # ── Drag & Drop ───────────────────────────────────────────────────────────
+
+    _BOOK_EXTS = {'.epub', '.fb2', '.mobi', '.azw3', '.cbz', '.cbr', '.pdf',
+                  '.zip', '.fb2.zip'}
+
+    def _is_book_url(self, url):
+        p = url.toLocalFile()
+        if not p:
+            return False
+        from pathlib import Path as _P
+        pl = _P(p)
+        # Файл с нужным расширением или папка
+        suffixes = ''.join(pl.suffixes).lower()
+        return pl.is_dir() or pl.suffix.lower() in self._BOOK_EXTS or suffixes in self._BOOK_EXTS
+
+    def dragEnterEvent(self, e):
+        md = e.mimeData()
+        if md.hasUrls() and any(self._is_book_url(u) for u in md.urls()):
+            e.acceptProposedAction()
+            self._show_drop_overlay(True)
+        else:
+            e.ignore()
+
+    def dragLeaveEvent(self, e):
+        self._show_drop_overlay(False)
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        self._show_drop_overlay(False)
+        urls = e.mimeData().urls()
+        paths = [u.toLocalFile() for u in urls if self._is_book_url(u)]
+        if paths:
+            e.acceptProposedAction()
+            self._process_books(paths)
+
+    def _show_drop_overlay(self, show: bool):
+        """Показывает/скрывает полупрозрачный оверлей при перетаскивании."""
+        if show:
+            if not hasattr(self, '_drop_overlay') or self._drop_overlay is None:
+                from PyQt6.QtWidgets import QLabel as _QL
+                from PyQt6.QtCore import Qt as _Qt
+                ov = _QL(self._central_widget)
+                ov.setAttribute(_Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                ov.setAlignment(_Qt.AlignmentFlag.AlignCenter)
+                ov.setText(
+                    f'<div style="color:{ACCENT};font-size:48px;font-family:Material Icons;">file_download</div>'
+                    f'<div style="color:{TEXT};font-size:18px;margin-top:12px;">'
+                    + (_ls(self.config, 'drop_to_add') if hasattr(self, 'config') else 'Перетащите книги сюда')
+                    + '</div>'
+                )
+                ov.setStyleSheet(
+                    f"background:rgba(0,0,0,0.55);"
+                    f"border:3px solid {ACCENT};"
+                    f"border-radius:12px;"
+                )
+                ov.setGeometry(self._central_widget.rect())
+                ov.show()
+                self._drop_overlay = ov
+            else:
+                self._drop_overlay.setGeometry(self._central_widget.rect())
+                self._drop_overlay.show()
+        else:
+            if hasattr(self, '_drop_overlay') and self._drop_overlay:
+                self._drop_overlay.hide()
+
     def closeEvent(self, e):
-        self.config.set("library_width",  self.width())
-        self.config.set("library_height", self.height())
+        # Сохраняем размер только если окно не максимизировано —
+        # иначе при восстановлении оно будет слишком маленьким
+        if not self.isMaximized():
+            self.config.set("library_width",  self.width())
+            self.config.set("library_height", self.height())
         e.accept()

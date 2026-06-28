@@ -105,6 +105,10 @@ class TTSController:
                 return client.get_voices()
         return []
 
+    def set_current_book(self, book_path: str):
+        """Устанавливает путь к текущей книге для локальных коррекций."""
+        self._current_book_path = book_path
+
     def speak(self, text: str, callback: Optional[Callable] = None):
         if not self.active_client:
             print("[TTS] Нет активного клиента")
@@ -114,10 +118,16 @@ class TTSController:
 
         # Нормализуем текст: римские цифры → арабские, очистка SSML
         from .utils import normalize_text_for_tts
-        text = normalize_text_for_tts(text)
-        
-        # Применяем коррекции произношения
-        text = self.apply_tts_corrections(text)
+        book_path = getattr(self, '_current_book_path', None)
+        text = normalize_text_for_tts(text, config=self.config, book_path=book_path)
+
+        # Если после нормализации текст пуст — это реклама или мусор,
+        # пропускаем и вызываем callback чтобы TTS продолжил работу
+        if not text.strip():
+            print("[TTS] Текст отфильтрован (реклама/мусор), пропускаем")
+            if callback:
+                callback()
+            return
 
         self.state = 'playing'
         def on_finished():
@@ -126,24 +136,7 @@ class TTSController:
                 callback()
         self.active_client.speak(text, on_finished)
 
-    def apply_tts_corrections(self, text: str) -> str:
-        """Применить замены слов из списка коррекций"""
-        corrections = self.config.get('tts_corrections', [])
-        if not corrections:
-            return text
-        
-        result = text
-        for item in corrections:
-            wrong = item.get('wrong', '')
-            correct = item.get('correct', '')
-            if wrong and correct:
-                # Простая замена всех вхождений
-                result = result.replace(wrong, correct)
-        
-        if result != text:
-            print(f"[TTS] Коррекция: '{text[:50]}...' → '{result[:50]}...'")
-        
-        return result
+
 
     def stop(self):
         """Остановить воспроизведение."""

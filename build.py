@@ -40,7 +40,7 @@ DIST_DIR        = "dist"
 BUILD_DIR       = "build"
 
 # Папки копируемые рядом с exe после сборки
-RESOURCE_DIRS = ["web", "fonts"]
+RESOURCE_DIRS = ["ibc"]
 
 # Python-модули исключить из сборки (не нужны)
 EXCLUDES = [
@@ -552,8 +552,46 @@ def run_upx(exe_dir: Path, args=None):
     targets += [f for f in exe_dir.rglob('*.dll') if f.is_file()]
     targets += [f for f in exe_dir.rglob('*.pyd') if f.is_file()]
 
+    # QtWebEngineCore — огромный файл (~197 МБ), сжимаем первым с увеличенным таймаутом
+    # На Windows Qt6WebEngineCore.dll защищён CFG — UPX его сломает, пропускаем.
+    webengine_names = [
+        'libQt6WebEngineCore.so.6',
+        'libQt6WebEngineCore.so',
+    ]
+    if sys.platform != 'win32':
+        webengine_names.append('Qt6WebEngineCore.dll')
+    webengine_files = []
+    for name in webengine_names:
+        for f in exe_dir.rglob(name):
+            if f.is_file() and f not in webengine_files:
+                webengine_files.append(f)
+
     total_before = sum(f.stat().st_size for f in targets)
     ok = failed = 0
+
+    for f in webengine_files:
+        if f in targets:
+            targets.remove(f)
+        size_mb = f.stat().st_size // 1024 // 1024
+        info(f"UPX: сжимаем {f.name} ({size_mb} МБ) — может занять несколько минут...")
+        # Убеждаемся что файл исполняемый — UPX требует этого на Linux
+        if sys.platform != 'win32':
+            f.chmod(f.stat().st_mode | 0o111)
+        result = subprocess.run(
+            [upx, '--best', str(f)],
+            capture_output=True, text=True,
+            timeout=600  # 10 минут для огромного файла
+        )
+        if result.returncode == 0:
+            ok += 1
+            new_mb = f.stat().st_size // 1024 // 1024
+            info(f"UPX: {f.name} {size_mb} МБ → {new_mb} МБ")
+        else:
+            # Показываем полную ошибку для диагностики
+            warn(f"UPX: не удалось сжать {f.name}")
+            warn(f"  stdout: {result.stdout.strip()[:200]}")
+            warn(f"  stderr: {result.stderr.strip()[:200]}")
+            failed += 1
 
     for f in sorted(targets):
         result = subprocess.run(
@@ -877,6 +915,7 @@ def build_nuitka(venv_python: Path, root: Path, dist_dir: Path, args=None):
         "--include-module=graphics_backend",
         "--include-module=audio_player",
         "--include-module=screen_inhibit",
+        "--include-module=cloud_download",
         # PyQt6.QtDBus нужен для screen_inhibit (кофеин-режим) на Linux
         *(["--include-module=PyQt6.QtDBus"] if sys.platform != "win32" else []),
         # Сетевые пакеты (edge-tts + requests)
