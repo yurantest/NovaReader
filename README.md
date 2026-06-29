@@ -75,7 +75,20 @@ sudo dnf install portaudio-devel libxcb-cursor
 
 ### 🐧 Arch Linux / Garuda / Manjaro
 sudo pacman -S portaudio xcb-util-cursor
+## Как восстановить из облака
 
+1. Загрузите файл `novareader_backup_*.zip` в облачное хранилище:
+   - **Яндекс.Диск** — нажмите «Поделиться» → скопируйте ссылку
+   - **Google Drive** — нажмите «Получить ссылку» → включите «Общий доступ»
+   - **Dropbox** — нажмите «Поделиться» → создайте ссылку
+
+2. Вставьте ссылку в программу → нажмите «Восстановить по ссылке»
+
+3. Программа сама:
+   - Определит сервис (Яндекс / Google / Dropbox)
+   - Получит прямую ссылку
+   - Скачает архив в папку пользователя
+   - Откроет диалог восстановления
 ---
 
 ## 📦 Исходный код
@@ -132,6 +145,5 @@ sudo pacman -S portaudio xcb-util-cursor
 ## 📧 Контакты
 
 - **Автор:** yuranZO
-- **Telegram:**
 - **GitHub:** [github.com/yurantest/NovaReader](https://github.com/yurantest/NovaReader)
 
