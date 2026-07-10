@@ -22,16 +22,26 @@
 
 <!-- Вставьте сюда пути к скриншотам -->
 Библиотека
-<img width="1366" height="722" alt="Снимок экрана_20260514_075702" src="https://github.com/user-attachments/assets/2baa3b6e-8224-43a6-8755-825ca57eb769" />
 
-!Чтение
-<img width="1360" height="733" alt="Снимок экрана_20260514_075901" src="https://github.com/user-attachments/assets/bc3fb6be-7e8e-4524-9def-91a7b27ef3a9" />
+<img width="1348" height="734" alt="2026-07-10_11-07" src="https://github.com/user-attachments/assets/1c15dc1d-0fb7-447f-9a25-cdef2704990a" />
 
-!Настройки
-<img width="1360" height="733" alt="Снимок экрана_20260514_075919" src="https://github.com/user-attachments/assets/4795212f-e64d-4d66-87c5-a80843c69308" />
-<img width="1360" height="733" alt="Снимок экрана_20260514_080652" src="https://github.com/user-attachments/assets/859ec835-f940-4e16-8439-5ebdcb8809a4" />
-<img width="1360" height="733" alt="Снимок экрана_20260514_101948" src="https://github.com/user-attachments/assets/3f6ac489-4632-4cd7-ad30-8e85c81f2f96" />
-<img width="1360" height="733" alt="Снимок экрана_20260514_102240" src="https://github.com/user-attachments/assets/f46a869a-dbac-4a6f-80d3-63d39f388328" />
+
+Чтение
+
+<img width="1920" height="1080" alt="2026-07-10_11-08" src="https://github.com/user-attachments/assets/b1953c65-1e64-4c75-91cb-3126b6e6b140" />
+<img width="1920" height="1080" alt="2026-07-10_11-13" src="https://github.com/user-attachments/assets/1beb742d-759f-4f35-a377-a53fe6953414" />
+
+Настройки
+
+<img width="724" height="579" alt="2026-07-10_11-16" src="https://github.com/user-attachments/assets/1d0f8f63-290f-4ff3-9861-61bdc720f886" />
+<img width="718" height="589" alt="2026-07-10_11-17" src="https://github.com/user-attachments/assets/795b94a4-21cd-4184-ae9c-6e5d60acb68e" />
+<img width="713" height="582" alt="2026-07-10_11-17_1" src="https://github.com/user-attachments/assets/77367527-a9ff-46ab-8dd9-63c6adae1b81" />
+<img width="722" height="579" alt="2026-07-10_11-17_2" src="https://github.com/user-attachments/assets/31fa778b-8e0f-41af-b22d-5d19b01684b4" />
+<img width="703" height="574" alt="2026-07-10_11-17_3" src="https://github.com/user-attachments/assets/fa44f52f-9402-4f79-9194-e0f2ab5c4d69" />
+<img width="717" height="590" alt="2026-07-10_11-18" src="https://github.com/user-attachments/assets/7ae6a483-09b4-43c8-af3b-7018a02f7c68" />
+<img width="727" height="594" alt="2026-07-10_11-18_1" src="https://github.com/user-attachments/assets/4e400176-c81f-42ca-a02e-5fbd723285af" />
+<img width="747" height="617" alt="2026-07-10_11-19" src="https://github.com/user-attachments/assets/c6df5370-0e43-4109-8a72-7618ed51e83f" />
+
 
 
 
@@ -87,20 +97,42 @@ sudo dnf install portaudio-devel libxcb-cursor
 
 ### 🐧 Arch Linux / Garuda / Manjaro
 sudo pacman -S portaudio xcb-util-cursor
-## Как восстановить из облака
 
+---
+## Как Создать и восстановить 
+---
+- Нажмите создать резервную копию
+- Откроется окно
+  
+  <img width="390" height="296" alt="изображение" src="https://github.com/user-attachments/assets/4a055223-0707-4943-aa4c-2de4b0ae83d0" />
+- Выберите нужные пункты
+- Сохраните бэкап
+
+  ---
+  - Нажмите восстановить резервную копию
+  - Откроется окно
+   - Выбирайте файл `novareader_backup_*.zip`
+    --- 
+---
+
+## Как восстановить из облака
 1. Загрузите файл `novareader_backup_*.zip` в облачное хранилище:
    - **Яндекс.Диск** — нажмите «Поделиться» → скопируйте ссылку
    - **Google Drive** — нажмите «Получить ссылку» → включите «Общий доступ»
    - **Dropbox** — нажмите «Поделиться» → создайте ссылку
 
-2. Вставьте ссылку в программу → нажмите «Восстановить по ссылке»
+2. Вставьте ссылку в программу → нажмите «Да»
+  <img width="522" height="175" alt="2026-07-10_11-32" src="https://github.com/user-attachments/assets/a9baf0ed-2199-4e52-b18b-8e197be20acc" />
 
-3. Программа сама:
+4. Программа сама:
    - Определит сервис (Яндекс / Google / Dropbox)
    - Получит прямую ссылку
    - Скачает архив в папку пользователя
    - Откроет диалог восстановления
+
+     <img width="322" height="351" alt="2026-07-10_11-30" src="https://github.com/user-attachments/assets/22c8c232-4bed-4a54-ad4d-d77ef31a7305" />
+
+
 ---
 
 ## 📦 Исходный код
