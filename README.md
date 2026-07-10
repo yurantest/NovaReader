@@ -124,7 +124,7 @@ sudo pacman -S portaudio xcb-util-cursor
 2. Вставьте ссылку в программу → нажмите «Да»
   <img width="522" height="175" alt="2026-07-10_11-32" src="https://github.com/user-attachments/assets/a9baf0ed-2199-4e52-b18b-8e197be20acc" />
 
-4. Программа сама:
+3. Программа сама:
    - Определит сервис (Яндекс / Google / Dropbox)
    - Получит прямую ссылку
    - Скачает архив в папку пользователя
