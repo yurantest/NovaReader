@@ -62,23 +62,25 @@ if sys.platform == 'win32':
     os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
         f'--use-gl=angle --use-angle=d3d11 '
         f'--disable-gpu-sandbox '
+        f'--max-frame-rate=60 '
         f'--disable-accelerated-2d-canvas '
         f'--disable-accelerated-video-decode '
         f'{_MEMORY_FLAGS}'
+        
     )
     os.environ['ANGLE_FEATURE_OVERRIDES_ENABLED'] = 'force_d3d11'
     os.environ['QTWEBENGINE_DISABLE_SANDBOX'] = '1'
 
 elif sys.platform == 'linux':
-    # ==================== VULKAN ====================
+    # ==================== OpenGL ====================
     os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
-        f'--use-gl=angle --use-angle=vulkan '      # ← WebEngine через Vulkan
-        f'--disable-gpu-compositing '
+        f'--use-gl=angle '      # ← WebEngine через OpenGL
         f'--disable-gpu-sandbox '
+        f'--max-frame-rate=60 '
         f'{_MEMORY_FLAGS}'
     )
     os.environ['QTWEBENGINE_DISABLE_SANDBOX'] = '1'
-    os.environ['QSG_RHI_BACKEND'] = 'vulkan'       # ← Qt Quick интерфейс на Vulkan
+    os.environ['QSG_RHI_BACKEND'] = 'opengl'       # ← Qt Quick интерфейс на OpenGL
 
 # Дополнительные оптимизации Qt WebEngine
 os.environ['QTWEBENGINE_LOCALES_PATH'] = ''

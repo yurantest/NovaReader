@@ -31,7 +31,6 @@ class ReaderBridge(QObject):
     # ── Безопасные аксессоры ─────────────────────────────────────────────
     # closeEvent обнуляет self.reader чтобы оборвать все callbacks.
     # Любой JS-callback может прилететь чуть позже — guard это перехватывает.
-
     @property
     def _r(self):
         """Возвращает reader или None если окно уже закрывается."""
@@ -80,23 +79,38 @@ class ReaderBridge(QObject):
         self.reader.web_view.setVisible(True)
         if hasattr(self.reader, '_loading_overlay'):
             self.reader._loading_overlay.fadeOut()
-        # Запускаем очистку памяти с задержкой 4с — даём WebEngine
-        # завершить все внутренние инициализации, после чего возвращаем
-        # незадействованные страницы ОС через malloc_trim.
+        # Запускаем циклическую очистку памяти каждые 4 секунды
         QTimer.singleShot(4000, self._trim_process_memory)
 
     @staticmethod
     def _trim_process_memory():
-        """Возвращает свободные арены glibc ядру (Linux).
-        Эквивалент того, что ОС делает при memory pressure —
-        но принудительно, сразу после полной загрузки книги."""
+        """Возвращает свободную память ОС.
+        Linux  : malloc_trim(0) — возвращает пустые арены glibc ядру
+        Windows: EmptyWorkingSet — освобождает неиспользуемые страницы процесса
+        Циклический вызов каждые 4 секунды — Chromium жадно держит память,
+        его нужно «пинать» чтобы он отдавал страницы обратно ОС.
+        """
         try:
             import ctypes
-            libc = ctypes.CDLL('libc.so.6', use_errno=True)
-            result = libc.malloc_trim(0)
-            print(f'[Memory] malloc_trim(0) -> {result} (1=OK, страницы возвращены ОС)')
+            import sys
+            if sys.platform == 'win32':
+                # Windows: EmptyWorkingSet освобождает все страницы, которые
+                # процесс не использует активно. Аналог malloc_trim на Linux.
+                # psapi.dll есть во всех версиях Windows начиная с XP.
+                kernel32 = ctypes.windll.kernel32
+                psapi = ctypes.windll.psapi
+                process = kernel32.GetCurrentProcess()
+                result = psapi.EmptyWorkingSet(process)
+                print(f'[Memory] EmptyWorkingSet -> {"OK" if result else "FAILED"}')
+            else:
+                # Linux: malloc_trim возвращает пустые арены glibc ядру
+                libc = ctypes.CDLL('libc.so.6', use_errno=True)
+                result = libc.malloc_trim(0)
+                print(f'[Memory] malloc_trim(0) -> {result} (1=OK, страницы возвращены ОС)')
         except Exception as e:
-            print(f'[Memory] malloc_trim недоступен: {e}')
+            print(f'[Memory] Ошибка очистки памяти: {e}')
+        # Рекурсивный вызов — таймер работает циклически, пока жив процесс
+        QTimer.singleShot(4000, ReaderBridge._trim_process_memory)
 
     @pyqtSlot(result=str)
     def getBookData(self):
@@ -110,7 +124,6 @@ class ReaderBridge(QObject):
                          'cbz'  if ext == '.cbz'  else
                          'pdf'  if ext == '.pdf'  else
                          'mobi' if ext == '.mobi' else 'unknown')
-
             # Передаём file:// URL — JS загружает книгу напрямую через fetch().
             # Это работает благодаря флагам --disable-web-security и
             # --allow-file-access-from-files в Chromium.
@@ -120,7 +133,6 @@ class ReaderBridge(QObject):
             file_url = book_path.as_uri()
             mb = book_path.stat().st_size / 1024 / 1024
             print(f"[Bridge] {book_type.upper()} {mb:.1f} MB -> file://, passing URL to JS")
-
             return json.dumps({
                 'type':     book_type,
                 'name':     book_path.name,
@@ -188,6 +200,20 @@ class ReaderBridge(QObject):
                         js = f"window._ttsDurationMs && window._ttsDurationMs({ms});"
                         self.reader.web_view.page().runJavaScript(js)
                 tts.active_client._duration_callback = _send_duration
+            # Пословные тайминги — только для Edge TTS (нативные WordBoundary события)
+            if hasattr(tts.active_client, '_word_timing_callback'):
+                def _send_word_timings(timings):
+                    # Вызывается из фонового asyncio-потока Edge TTS.
+                    # runJavaScript нельзя дёргать не из главного потока Qt —
+                    # перекидываем выполнение через QTimer.singleShot(0, ...).
+                    def _do_send():
+                        if self.reader is not None:
+                            import json as _json
+                            js = (f"window._ttsWordTimings && "
+                                  f"window._ttsWordTimings({_json.dumps(timings)});")
+                            self.reader.web_view.page().runJavaScript(js)
+                    QTimer.singleShot(0, _do_send)
+                tts.active_client._word_timing_callback = _send_word_timings
             tts.speak(text, self._on_tts_finished)
         else:
             print(f"[Reader] onTTSText: окно закрывается, игнорируем")
@@ -334,6 +360,7 @@ class ReaderBridge(QObject):
                 'ru_RU_irina_medium'
             ),
             'tts_highlight_color': tts_color,
+            'tts_word_mode': self._config.get('tts_word_mode', False),
             'reader_font_family': self._config.get('reader_font_family', self._config.DEFAULT_FONT),
             'font_faces': self._config.get_font_file_map(),
             'fonts_base_url': self._config.get_fonts_base_url(),
@@ -519,11 +546,9 @@ class ReaderBridge(QObject):
             self.piperError.emit(voice_id, f'Голос не найден: {voice_id}')
             return
         print(f"[Bridge] Начало загрузки: {voice_id}")
-
         def on_progress(downloaded, total):
             pct = int(downloaded * 100 / total) if total > 0 else 0
             self.piperProgress.emit(voice_id, pct)
-
         worker = DownloadWorker(downloader, voice_info, on_progress)
         worker.finished.connect(lambda ok: self._on_voice_download_finished(voice_id, ok))
         worker.error.connect(lambda err: self._on_voice_download_error(voice_id, err))
@@ -579,7 +604,6 @@ class _LoadingOverlay(QWidget):
         self._bg = QColor(bg_color)
         self._angle = 0
         self._book_name = ''
-
         self._timer = QTimer(self)
         self._timer.setInterval(16)  # ~60 fps
         self._timer.timeout.connect(self._tick)
@@ -601,17 +625,14 @@ class _LoadingOverlay(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
         # Фон
         p.fillRect(self.rect(), self._bg)
-
         cx, cy = self.width() / 2, self.height() / 2
         is_dark = self._bg.lightness() < 128
         text_color = QColor('#e0e0e0') if is_dark else QColor('#5b4636')
         sub_color  = QColor('#888888')
         spin_bg    = QColor(120, 120, 120, 40)
         spin_fg    = QColor('#6c5ce7')
-
         # Название книги
         if self._book_name:
             # Метка ЗАГРУЗКА
@@ -623,7 +644,6 @@ class _LoadingOverlay(QWidget):
             p.drawText(self.rect().adjusted(0, 0, 0, -120),
                        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
                        'ЗАГРУЗКА')
-
             # Название
             name_font = QFont()
             name_font.setPointSize(16)
@@ -634,24 +654,20 @@ class _LoadingOverlay(QWidget):
             p.drawText(name_rect,
                        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
                        self._book_name)
-
         # Спиннер
         r = 18
         pen_w = 3
         spinner_rect = QRectF(cx - r, cy + 40, r * 2, r * 2)
-
         # Фоновое кольцо
         pen = QPen(spin_bg, pen_w)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
         p.drawEllipse(spinner_rect)
-
         # Дуга
         pen2 = QPen(spin_fg, pen_w)
         pen2.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen2)
         p.drawArc(spinner_rect, int(-self._angle * 16), 100 * 16)
-
         p.end()
 
     def fadeOut(self):
@@ -713,7 +729,6 @@ class ReaderWindow(QMainWindow):
         self._setup_ui()
         self._setup_webchannel()
         self._setup_shortcuts()
-
         # Qt-оверлей поверх окна — виден пока web_view скрыт
         theme_bg = config.get('theme_bg', '#f4ecd8')
         self._loading_overlay = _LoadingOverlay(self, theme_bg)
@@ -730,9 +745,7 @@ class ReaderWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
-
         self.web_view = QWebEngineView()
-
         settings = self.web_view.settings()
         # Включаем только необходимое
         settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
@@ -746,7 +759,6 @@ class ReaderWindow(QMainWindow):
         settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, False)
         settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, False)
         settings.setAttribute(QWebEngineSettings.WebAttribute.ScreenCaptureEnabled, False)
-
         # Профиль WebEngine настраивается централизованно в main.py
         # (до создания любого QWebEngineView) — здесь только добираем view.
         profile = self.web_view.page().profile()
@@ -757,9 +769,7 @@ class ReaderWindow(QMainWindow):
             profile.setHttpCacheType(_P.HttpCacheType.NoCache)
         except Exception:
             pass
-
         layout.addWidget(self.web_view)
-
         # Путь к reader.html: в скомпилированном приложении (PyInstaller)
         # __file__ указывает на директорию извлечённых файлов.
         # В режиме --onefile эта директория меняется при каждом запуске →
@@ -819,7 +829,6 @@ class ReaderWindow(QMainWindow):
                 piper_voices.append({'id': voice_id, 'name': voice_data["display_name"], 'installed': installed, 'size_mb': 83})
             print(f"[Push] Piper: {sum(1 for v in piper_voices if v['installed'])}/{len(piper_voices)} загружено")
             self.web_view.page().runJavaScript(f"window._pushPiperVoices && window._pushPiperVoices({_json.dumps(piper_voices)});")
-
             sys_engines = []
             if self.tts_controller:
                 for client in self.tts_controller.clients:
@@ -1040,33 +1049,28 @@ class ReaderWindow(QMainWindow):
             event.accept()
             return
         self._closing = True
-
         # Немедленно останавливаем все таймеры оверлея — иначе зависание
         if hasattr(self, '_resize_hide_timer'):
             self._resize_hide_timer.stop()
         if hasattr(self, '_loading_overlay'):
             self._loading_overlay.forceHide()
-
         # Сохраняем размер только если не максимизировано
         if not self.isMaximized():
             self.config.set('reader_width', self.width())
             self.config.set('reader_height', self.height())
             self.config.save()
-
         # Снимаем запрет гашения экрана при закрытии
         try:
             self._screen_timeout_timer.stop()
             self._screen_inhibitor.uninhibit()
         except Exception:
             pass
-
         # Страховочная очистка IndexedDB-кэша FB2 перед закрытием
         try:
             if self.current_book and str(self.current_book).lower().endswith('.fb2'):
                 self._clear_fb2_cache()
         except Exception:
             pass
-
         # Останавливаем TTS только если именно это окно что-то воспроизводило.
         # tts_controller.stop() трогает глобальный AudioPlayer — если вызвать его
         # из окна где TTS не играл, это оборвёт воспроизведение в другом окне.
@@ -1110,12 +1114,10 @@ class ReaderWindow(QMainWindow):
                         pass
             # Отключаем bridge от контроллера — callback'и больше не должны стрелять
             self.tts_controller = None
-
         # Отключаем bridge от окна чтобы никакие JS-callback'и не дошли
         # после того как окно начнёт разрушаться
         try:
             self.bridge.reader = None
         except Exception:
             pass
-
         event.accept()

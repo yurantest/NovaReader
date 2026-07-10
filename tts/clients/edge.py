@@ -48,6 +48,7 @@ class EdgeClient(TTSClient):
         # БАГ-ФИКС: один callback — _sentence_callback.
         # on_finish_callback из базового класса больше НЕ используется для TTS-цепочки.
         self._sentence_callback: Optional[Callable] = None
+        self._word_timing_callback: Optional[Callable] = None  # callback(list[dict]) — нативные тайминги слов от Edge
         self._finished_called = False
         self._current_future = None  # Future текущей корутины — для отмены при stop()
 
@@ -104,7 +105,6 @@ class EdgeClient(TTSClient):
             # (раньше дублировалось в on_finish_callback → двойной вызов)
             self._sentence_callback = callback
             self.is_speaking = True
-            self._duration_callback = None  # сброс; будет установлен снаружи
 
         print(f"[EdgeTTS] Озвучивание: {self.current_voice} | {text[:60]}")
         future = asyncio.run_coroutine_threadsafe(
@@ -126,6 +126,7 @@ class EdgeClient(TTSClient):
 
             mp3_data = b''
             chunk_count = 0
+            word_boundaries = []  # [{"start_ms": int, "end_ms": int, "text": str}]
             async for chunk in communicate.stream():
                 if self._stop_flag:
                     print("[EdgeTTS]  Прервано")
@@ -133,8 +134,18 @@ class EdgeClient(TTSClient):
                 if chunk["type"] == "audio":
                     mp3_data += chunk["data"]
                     chunk_count += 1
+                elif chunk["type"] == "WordBoundary":
+                    # offset/duration в единицах 100ns → переводим в миллисекунды
+                    start_ms = chunk["offset"] / 10000
+                    end_ms = (chunk["offset"] + chunk["duration"]) / 10000
+                    word_boundaries.append({
+                        "start_ms": round(start_ms),
+                        "end_ms": round(end_ms),
+                        "text": chunk["text"],
+                    })
 
-            print(f"[EdgeTTS] MP3: {chunk_count} чанков, {len(mp3_data)} байт")
+            print(f"[EdgeTTS] MP3: {chunk_count} чанков, {len(mp3_data)} байт, "
+                  f"слов с таймингом: {len(word_boundaries)}")
 
             if not mp3_data:
                 print("[EdgeTTS]  Нет аудио данных → _on_audio_finished")
@@ -160,15 +171,14 @@ class EdgeClient(TTSClient):
                 return
 
             if pcm_data and len(pcm_data) > 0:
-                # Точная длительность по PCM: 22050 Гц, 16-бит моно = 2 байта/сэмпл
-                duration_ms = int(len(pcm_data) / (22050 * 2) * 1000)
-                if self._duration_callback:
+                # Передаём нативные тайминги слов от Edge TTS — точны, без VAD-эвристик
+                if self._word_timing_callback and word_boundaries:
                     try:
-                        self._duration_callback(duration_ms)
-                    except Exception as _de:
-                        print(f"[EdgeTTS] duration_callback error: {_de}")
+                        self._word_timing_callback(word_boundaries)
+                    except Exception as e:
+                        print(f"[EdgeTTS]  Ошибка word_timing_callback: {e}")
                 player.play_chunk(pcm_data, is_last=True)
-                print(f"[EdgeTTS] Ждём callback из AudioPlayer (duration={duration_ms}ms)...")
+                print("[EdgeTTS] Ждём callback из AudioPlayer...")
             else:
                 print("[EdgeTTS]  PCM пуст → _on_audio_finished")
                 self._on_audio_finished()

@@ -336,10 +336,33 @@ class Config:
 
     @staticmethod
     def _fonts_dir() -> Path:
+        """Основная папка шрифтов рядом с программой."""
         import sys as _sys
         if getattr(_sys, 'frozen', False):
-            return Path(_sys.executable).parent / 'ibc/fonts'
-        return Path(__file__).parent / 'ibc/fonts'
+            return Path(_sys.executable).parent / 'ibc' / 'fonts'
+        return Path(__file__).parent / 'ibc' / 'fonts'
+
+    @staticmethod
+    def _all_fonts_dirs() -> list:
+        """Все папки со шрифтами — основная + пользовательская (~/.config/NovaReader/fonts/)."""
+        import sys as _sys, os as _os
+        dirs = []
+        # Основная — рядом с программой
+        if getattr(_sys, 'frozen', False):
+            primary = Path(_sys.executable).parent / 'ibc' / 'fonts'
+        else:
+            primary = Path(__file__).parent / 'ibc' / 'fonts'
+        if primary.exists():
+            dirs.append(primary)
+        # Пользовательская — fallback когда нет прав на запись в основную
+        if _sys.platform == 'win32':
+            base = Path(_os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming'))
+        else:
+            base = Path(_os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
+        user_fonts = base / 'NovaReader' / 'fonts'
+        if user_fonts.exists() and user_fonts != primary:
+            dirs.append(user_fonts)
+        return dirs
 
     def get_fonts_base_url(self) -> str:
         """
@@ -371,24 +394,22 @@ class Config:
         exclude = ['Material Icons', 'MaterialIcons', 'Font Awesome',
                    'Material Symbols']
         supported = {'.ttf', '.otf', '.woff', '.woff2'}
-        fonts_dir = self._fonts_dir()
-        if not fonts_dir.exists():
-            return []
 
         seen: set[str] = set()
         result: list[str] = []
-        for f in sorted(fonts_dir.iterdir()):
-            if f.suffix.lower() not in supported:
-                continue
-            meta = self._read_font_meta(f)
-            if not meta:
-                continue
-            if any(ex in meta['family'] for ex in exclude):
-                continue
-            dn = meta['display_name']
-            if dn not in seen:
-                seen.add(dn)
-                result.append(dn)
+        for fonts_dir in self._all_fonts_dirs():
+            for f in sorted(fonts_dir.iterdir()):
+                if f.suffix.lower() not in supported:
+                    continue
+                meta = self._read_font_meta(f)
+                if not meta:
+                    continue
+                if any(ex in meta['family'] for ex in exclude):
+                    continue
+                dn = meta['display_name']
+                if dn not in seen:
+                    seen.add(dn)
+                    result.append(dn)
         return sorted(result)
 
     def get_font_file_map(self) -> list:
@@ -402,10 +423,11 @@ class Config:
         exclude = ['Material Icons', 'MaterialIcons', 'Font Awesome',
                    'Material Symbols']
         supported = {'.ttf', '.otf', '.woff', '.woff2'}
-        fonts_dir = self._fonts_dir()
+        import urllib.request as _ur
+        import sys as _sys
         result: list = []
 
-        if fonts_dir.exists():
+        for fonts_dir in self._all_fonts_dirs():
             for f in sorted(fonts_dir.iterdir()):
                 if f.suffix.lower() not in supported:
                     continue
@@ -414,6 +436,14 @@ class Config:
                     continue
                 if any(ex in meta['family'] for ex in exclude):
                     continue
+                # Добавляем абсолютный file:// URL чтобы @font-face работал
+                # независимо от того в какой папке лежит файл
+                path_str = str(f.resolve())
+                if _sys.platform == 'win32':
+                    file_url = 'file:///' + _ur.pathname2url(path_str).lstrip('/')
+                else:
+                    file_url = 'file://' + _ur.pathname2url(path_str)
+                meta = dict(meta, file_url=file_url)
                 result.append(meta)
 
         self._font_file_map_cache = result
@@ -1483,8 +1513,11 @@ class Config:
             del self._corrections['per_book'][book_path]
         self.save_corrections()
 
-    def iter_backup_files(self):
-        """Генератор (arc_name, abs_path) всех файлов резервной копии."""
+    def iter_backup_files(self, include_voices=False, include_fonts=False):
+        """Генератор (arc_name, abs_path) всех файлов резервной копии.
+        include_voices — включить голоса Piper (~/.config/NovaReader/voices/)
+        include_fonts  — включить пользовательские шрифты (~/.config/NovaReader/fonts/)
+        """
         config_files = {
             'config/settings.json':   self.config_file,
             'config/library.json':    self.library_file,
@@ -1506,7 +1539,37 @@ class Config:
                 if f.is_file():
                     yield 'library/' + f.relative_to(self.library_path).as_posix(), f
 
-    def backup_stats(self):
+        # Голоса Piper — хранятся в ~/.config/NovaReader/voices/
+        if include_voices and self.voices_dir.exists():
+            for f in sorted(self.voices_dir.rglob('*')):
+                if f.is_file():
+                    yield 'voices/' + f.relative_to(self.voices_dir).as_posix(), f
+
+        # Пользовательские шрифты — ~/.config/NovaReader/fonts/
+        if include_fonts:
+            import sys as _sys, os as _os
+            if _sys.platform == 'win32':
+                base = Path(_os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming'))
+            else:
+                base = Path(_os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
+            user_fonts = base / 'NovaReader' / 'fonts'
+            if user_fonts.exists():
+                for f in sorted(user_fonts.rglob('*')):
+                    if f.is_file():
+                        yield 'user_fonts/' + f.relative_to(user_fonts).as_posix(), f
+
+    def backup_stats(self, include_voices=False, include_fonts=False):
+        """Возвращает (total_files, total_bytes) для предпросмотра."""
+        total_files, total_bytes = 0, 0
+        for _arc, src in self.iter_backup_files(include_voices=include_voices,
+                                                include_fonts=include_fonts):
+            total_files += 1
+            try:
+                total_bytes += src.stat().st_size
+            except OSError:
+                pass
+        return total_files, total_bytes
+
         """Возвращает (total_files, total_bytes) для предпросмотра."""
         total_files, total_bytes = 0, 0
         for _arc, src in self.iter_backup_files():
@@ -1517,13 +1580,15 @@ class Config:
                 pass
         return total_files, total_bytes
 
-    def backup_to_zip(self, dest_path: str, progress_cb=None, cancel_flag=None) -> dict:
+    def backup_to_zip(self, dest_path: str, progress_cb=None, cancel_flag=None,
+                       include_voices=False, include_fonts=False) -> dict:
         """Создать ZIP-архив. Возвращает {'files', 'bytes_src', 'cancelled', 'library_path'}."""
         import zipfile
 
         files_written = 0
         bytes_src = 0
-        all_files = list(self.iter_backup_files())
+        all_files = list(self.iter_backup_files(include_voices=include_voices,
+                                                     include_fonts=include_fonts))
         total = len(all_files)
 
         with zipfile.ZipFile(dest_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zf:

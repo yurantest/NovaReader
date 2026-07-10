@@ -2499,8 +2499,8 @@ class LibraryWindow(QMainWindow):
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QProgressBar
         from PyQt6.QtCore import QThread
 
-        # ── предварительный подсчёт ──────────────────────────
-        total_files, total_bytes = self.config.backup_stats()
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                      QCheckBox, QPushButton, QLabel)
 
         def _fmt_size(b):
             for unit in ('Б', 'КБ', 'МБ', 'ГБ'):
@@ -2512,26 +2512,94 @@ class LibraryWindow(QMainWindow):
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         default_name = f"novareader_backup_{ts}.zip"
 
-        # Показываем что будет в архиве
-        info = QMessageBox(self)
-        info.setWindowTitle("Создать резервную копию")
-        info.setText(
-            "<b>В архив войдут:</b><br><br>"
-            "   Настройки программы<br>"
-            "   Все книги из библиотеки<br>"
-            "    Обложки<br>"
-            "   Закладки<br>"
-            "    Выделения и заметки<br>"
-            "   Позиции чтения<br><br>"
-            f"Файлов: <b>{total_files}</b> &nbsp;·&nbsp; "
-            f"Размер: <b>~{_fmt_size(total_bytes)}</b>")
-        info.setStandardButtons(
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
-        info.button(QMessageBox.StandardButton.Ok).setText(_ls(self.config, 'dlg_choose_file'))
-        info.button(QMessageBox.StandardButton.Cancel).setText(_ls(self.config, 'cancel'))
-        _apply_msgbox_style(info)
-        if info.exec() != QMessageBox.StandardButton.Ok:
+        # ── Диалог выбора содержимого архива ────────────────
+        dlg_info = QDialog(self)
+        dlg_info.setWindowTitle('Создать резервную копию')
+        dlg_info.setFixedWidth(380)
+        dlg_info.setStyleSheet(
+            f'QDialog{{background:{BG};color:{TEXT};}}'
+            f'QLabel{{color:{TEXT};}}'
+            f'QCheckBox{{color:{TEXT};font-size:13px;spacing:8px;}}'
+            f'QCheckBox::indicator{{width:17px;height:17px;border-radius:4px;'
+            f'border:1px solid {BORDER};background:{SURFACE};}}'
+            f'QCheckBox::indicator:checked{{background:{ACCENT};border-color:{ACCENT};}}'
+            f'QPushButton{{background:{SURFACE};color:{TEXT};border:1px solid {BORDER};'
+            f'border-radius:6px;padding:7px 18px;font-size:13px;min-width:0;}}'
+            f'QPushButton:hover{{border-color:{ACCENT};background:rgba(255,255,255,.08);}}'
+            f'QPushButton:pressed{{background:{ACCENT};color:#fff;border-color:{ACCENT};}}'
+        )
+        vlay = QVBoxLayout(dlg_info)
+        vlay.setSpacing(10)
+        vlay.setContentsMargins(20, 18, 20, 16)
+
+        lbl_title = QLabel('<b>В архив войдут:</b>')
+        vlay.addWidget(lbl_title)
+
+        lbl_always = QLabel(
+            '&nbsp;&nbsp;✓&nbsp; Настройки программы<br>'
+            '&nbsp;&nbsp;✓&nbsp; Все книги из библиотеки<br>'
+            '&nbsp;&nbsp;✓&nbsp; Закладки, выделения, позиции')
+        lbl_always.setStyleSheet(f'color:{SUB};font-size:12px;')
+        lbl_always.setTextFormat(Qt.TextFormat.RichText)
+        vlay.addWidget(lbl_always)
+
+        vlay.addSpacing(4)
+
+        # Опциональные папки
+        chk_voices = QCheckBox('Голоса Piper (~/.config/NovaReader/voices/)')
+        chk_fonts  = QCheckBox('Пользовательские шрифты (~/.config/NovaReader/fonts/)')
+        chk_voices.setChecked(self.config.get('backup_include_voices', False))
+        chk_fonts.setChecked(self.config.get('backup_include_fonts', False))
+        vlay.addWidget(chk_voices)
+        vlay.addWidget(chk_fonts)
+
+        vlay.addSpacing(6)
+
+        # Статистика — обновляется при изменении галочек
+        lbl_stats = QLabel()
+        lbl_stats.setStyleSheet(f'color:{SUB};font-size:12px;')
+        vlay.addWidget(lbl_stats)
+
+        def _update_stats():
+            nf, nb = self.config.backup_stats(
+                include_voices=chk_voices.isChecked(),
+                include_fonts=chk_fonts.isChecked())
+            lbl_stats.setText(f'Файлов: <b>{nf}</b> &nbsp;·&nbsp; Размер: <b>~{_fmt_size(nb)}</b>')
+            lbl_stats.setTextFormat(Qt.TextFormat.RichText)
+        _update_stats()
+        chk_voices.toggled.connect(lambda _: _update_stats())
+        chk_fonts.toggled.connect(lambda _: _update_stats())
+
+        vlay.addSpacing(4)
+
+        # Кнопки
+        btn_row = QHBoxLayout()
+        btn_ok = QPushButton(_ls(self.config, 'dlg_choose_file'))
+        btn_ok.setStyleSheet(
+            f'QPushButton{{background:{ACCENT};color:#fff;border:1px solid {ACCENT};'
+            f'border-radius:6px;padding:7px 18px;font-size:13px;min-width:0;}}'
+        )
+        btn_cancel = QPushButton(_ls(self.config, 'cancel'))
+        btn_row.addStretch()
+        btn_row.addWidget(btn_ok)
+        btn_row.addWidget(btn_cancel)
+        vlay.addLayout(btn_row)
+
+        btn_ok.clicked.connect(dlg_info.accept)
+        btn_cancel.clicked.connect(dlg_info.reject)
+
+        if dlg_info.exec() != QDialog.DialogCode.Accepted:
             return
+
+        # Запоминаем выбор пользователя
+        incl_voices = chk_voices.isChecked()
+        incl_fonts  = chk_fonts.isChecked()
+        self.config.set('backup_include_voices', incl_voices)
+        self.config.set('backup_include_fonts', incl_fonts)
+
+        # ── предварительный подсчёт (для прогресс-бара) ─────────────────────
+        total_files, total_bytes = self.config.backup_stats(
+            include_voices=incl_voices, include_fonts=incl_fonts)
 
         dest, _ = _styled_get_save_filename(
             self, _ls(self.config, 'dlg_save_backup'),
@@ -2590,11 +2658,13 @@ class LibraryWindow(QMainWindow):
             done_sig     = pyqtSignal(dict)
             error_sig    = pyqtSignal(str)
 
-            def __init__(self, cfg, dest, cancel_flag):
+            def __init__(self, cfg, dest, cancel_flag, incl_voices=False, incl_fonts=False):
                 super().__init__()
                 self._cfg = cfg
                 self._dest = dest
                 self._cancel = cancel_flag
+                self._incl_voices = incl_voices
+                self._incl_fonts  = incl_fonts
 
             def run(self):
                 try:
@@ -2602,12 +2672,15 @@ class LibraryWindow(QMainWindow):
                         self._dest,
                         progress_cb=lambda cur, tot, name:
                             self.progress_sig.emit(cur, tot, name),
-                        cancel_flag=self._cancel)
+                        cancel_flag=self._cancel,
+                        include_voices=self._incl_voices,
+                        include_fonts=self._incl_fonts)
                     self.done_sig.emit(result)
                 except Exception as e:
                     self.error_sig.emit(str(e))
 
-        worker = _BackupWorker(self.config, dest, cancel_flag)
+        worker = _BackupWorker(self.config, dest, cancel_flag,
+                              incl_voices=incl_voices, incl_fonts=incl_fonts)
 
         def on_progress(cur, tot, name):
             progress.setValue(cur)
