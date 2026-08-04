@@ -5004,7 +5004,9 @@
                         <div class="bm-label">${bm.label}</div>
                         <div class="bm-progress">${Math.round((bm.progress||0)*100)}%</div>
                     </div>
-                    <button class="bm-del" data-id="${bm.id}" title="Удалить"></button>
+                    <button class="bm-del" data-id="${bm.id}" title="Удалить">
+                        <span class="material-icons" style="font-size:18px;">delete_outline</span>
+                    </button>
                 `;
                 div.querySelector('.bm-del').addEventListener('click', e => {
                     e.stopPropagation();
@@ -5876,7 +5878,15 @@
             const container = document.getElementById('voiceList');
             if (!container) return;
 
-            const voices = VOICES[currentEngine] || [];
+            const allVoices = VOICES[currentEngine] || [];
+            // Для Piper показываем ТОЛЬКО реально установленные голоса —
+            // иначе список раздувается до всего каталога потенциально
+            // доступных для скачивания (десятки записей при полном каталоге),
+            // и непонятно, что из этого реально можно выбрать прямо сейчас.
+            const voices = (currentEngine === 'Piper')
+                ? allVoices.filter(v => v.available)
+                : allVoices;
+
             container.innerHTML = '';
 
             if (!voices.length) {
@@ -6883,6 +6893,13 @@
                     defaultVoice = 'ru_RU_irina_medium';
                 } else if (currentEngine === 'RHVoice' || currentEngine === 'SpeechD') {
                     defaultVoice = 'Anna';
+                } else if (currentEngine !== 'Edge') {
+                    // Любой другой движок, обнаруженный динамически (системные TTS,
+                    // CosyVoice и т.п.) — берём первый голос из уже загруженного
+                    // списка VOICES[currentEngine], а не хардкодим id Edge-голоса,
+                    // которого там точно нет.
+                    const list = VOICES[currentEngine];
+                    defaultVoice = (list && list.length) ? list[0].id : '';
                 }
                 currentVoice = defaultVoice;
                 renderVoiceList();
