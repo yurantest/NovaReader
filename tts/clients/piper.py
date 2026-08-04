@@ -54,6 +54,23 @@ class PiperClient(TTSClient):
         self.piper_bin = self._find_binary()
         self.player = self._find_player()
 
+        # Защита от «голос удалили — TTS молчит, пока не выберешь заново».
+        # Раньше current_voice бралось из конфига без проверки, что файл
+        # вообще существует на диске — если пользователь удалил ранее
+        # выбранный голос (например, через "Голоса Piper TTS" в настройках),
+        # find_voice_path() падал только в момент реального speak(), тихо
+        # печатая ошибку, а сам voice_id в конфиге так и оставался битым.
+        if not config.find_voice_path(self.current_voice):
+            print(f"[Piper] ВНИМАНИЕ: сохранённый голос '{self.current_voice}' "
+                  f"не найден на диске — ищем установленную замену...")
+            fallback = self._find_any_installed_voice()
+            if fallback:
+                print(f"[Piper] Переключаемся на установленный голос: {fallback}")
+                self.current_voice = fallback
+                config.set('piper_voice', fallback)
+            else:
+                print(f"[Piper] ВНИМАНИЕ: установленных голосов Piper не найдено вообще")
+
         print("[Piper] " + "=" * 40)
         print(f"[Piper] Платформа: {sys.platform}")
         print(f"[Piper] Бинарник: {self.piper_bin or 'НЕ НАЙДЕН'}")
@@ -119,6 +136,26 @@ class PiperClient(TTSClient):
         for player in ['ffplay', 'mpv', 'vlc', 'mplayer']:
             if shutil.which(player):
                 return player
+        return None
+
+    def _find_any_installed_voice(self) -> Optional[str]:
+        """Сканирует voices_dir и возвращает voice_id первого реально
+        установленного голоса (плоская структура: *.onnx рядом с *.onnx.json).
+        Используется как запасной вариант, если голос, сохранённый в
+        конфиге, был удалён с диска."""
+        try:
+            voices_dir = self.config.voices_dir
+            if not voices_dir.exists():
+                return None
+            for onnx_file in sorted(voices_dir.glob('*.onnx')):
+                json_file = onnx_file.with_suffix('.onnx.json')
+                if json_file.exists():
+                    # На диске имя с дефисами (ru_RU-irina-medium), а voice_id
+                    # в остальной системе — с подчёркиваниями. Приводим к тому
+                    # виду, который ожидает find_voice_path/остальной код.
+                    return onnx_file.stem.replace('-', '_')
+        except Exception as e:
+            print(f"[Piper] Ошибка поиска установленных голосов: {e}")
         return None
 
     @property
