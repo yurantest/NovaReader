@@ -8,5 +8,6 @@ edge-tts
 
 requests
 imageio
+beautifulsoup4
 
-
+cloudscraper

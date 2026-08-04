@@ -1,19 +1,18 @@
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                             QPushButton, QSlider, QComboBox, QGroupBox,
-                             QWidget, QGridLayout, QColorDialog,
-                             QRadioButton, QButtonGroup, QCheckBox,
-                             QStackedWidget, QFrame, QScrollArea,
-                             QSizePolicy, QApplication, QFileDialog,
-                             QMessageBox, QListWidget, QListWidgetItem)
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QPalette
+QPushButton, QSlider, QComboBox, QGroupBox,
+QWidget, QGridLayout, QColorDialog,
+QRadioButton, QButtonGroup, QCheckBox,
+QStackedWidget, QFrame, QScrollArea,
+QSizePolicy, QApplication, QFileDialog,
+QMessageBox, QListWidget, QListWidgetItem,
+QAbstractButton)
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QRectF
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QPalette, QPen, QPainterPath, QFontMetrics
 import json
 import shutil
 import sys
 from pathlib import Path
-
 from piper_voices_widget import PiperVoicesWidget
-
 
 def _sys_color(role, group=QPalette.ColorGroup.Normal):
     return QApplication.palette().color(group, role).name()
@@ -30,6 +29,41 @@ def _is_dark():
     bg = QColor(_sys_color(QPalette.ColorRole.Window))
     return bg.lightness() < 128
 
+def _contrast_color(bg_hex):
+    """Чёрный или белый — какой даёт больше контраста с bg_hex.
+    Не полагается на то, что цвета темы (в т.ч. пользовательские)
+    вообще сочетаются друг с другом — считает яркость фона напрямую
+    по формуле YIQ."""
+    c = QColor(bg_hex)
+    yiq = (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000
+    return '#1a1a1a' if yiq >= 140 else '#ffffff'
+
+_MATERIAL_ICONS_FAMILY = None
+
+def _material_icons_family():
+    """Регистрирует MaterialIcons-Regular.ttf (один раз на процесс) и
+    возвращает имя семейства шрифта для рисования иконочных глифов
+    напрямую через QPainter.drawText() — так глиф красится в любой
+    цвет через обычный QPen, в отличие от растрового/SVG-изображения."""
+    global _MATERIAL_ICONS_FAMILY
+    if _MATERIAL_ICONS_FAMILY is not None:
+        return _MATERIAL_ICONS_FAMILY
+    from PyQt6.QtGui import QFontDatabase
+    candidates = [
+        Path(__file__).parent / 'ibc' / 'fonts' / 'MaterialIcons-Regular.ttf',
+        Path(__file__).parent / 'ibc' / 'MaterialIcons-Regular.ttf',
+    ]
+    family = None
+    for path in candidates:
+        if path.exists():
+            font_id = QFontDatabase.addApplicationFont(str(path))
+            families = QFontDatabase.applicationFontFamilies(font_id)
+            if families:
+                family = families[0]
+                break
+    _MATERIAL_ICONS_FAMILY = family or ''
+    return _MATERIAL_ICONS_FAMILY
+
 def _build_palette():
     win    = _sys_color(QPalette.ColorRole.Window)
     base   = _sys_color(QPalette.ColorRole.Base)
@@ -38,15 +72,12 @@ def _build_palette():
     sub    = _sys_color(QPalette.ColorRole.PlaceholderText) if hasattr(QPalette.ColorRole, 'PlaceholderText') else _sys_color(QPalette.ColorRole.Dark)
     accent = _sys_color(QPalette.ColorRole.Highlight)
     mid    = _sys_color(QPalette.ColorRole.Mid)
-
     dark = _is_dark()
     surface = _blend(win, base, 0.5) if dark else base
     border  = mid if QColor(mid).lightness() not in (0, 255) else _blend(win, text, 0.15)
     hover   = _blend(win, text, 0.06)
-    # Плохой sub (чёрный/белый) — делаем из текста
     if QColor(sub).lightness() in (0, 255):
         sub = _blend(text, win, 0.45)
-
     return dict(
         S_BG      = win,
         S_SURFACE = surface,
@@ -57,7 +88,6 @@ def _build_palette():
         S_HOVER   = hover,
     )
 
-# Глобальная палитра — заполняется при первом создании окна
 _P = {}
 S_BG = S_SURFACE = S_BORDER = S_ACCENT = S_TEXT = S_SUB = S_HOVER = "#000000"
 
@@ -72,9 +102,149 @@ def _refresh_palette():
     S_SUB     = _P['S_SUB']
     S_HOVER   = _P['S_HOVER']
 
+class QToggleSwitch(QAbstractButton):
+    """Кастомный переключатель (toggle switch) вместо чекбокса.
+
+    По умолчанию красится в палитру settings_window (S_ACCENT/S_BORDER) —
+    так работали все существующие вызовы внутри самого settings_window.py,
+    и трогать их не пришлось. Но если виджет используется в ДРУГОМ окне
+    со своей собственной палитрой (например, диалог бэкапа в
+    library_window.py, у которого свои ACCENT/BORDER, независимые от
+    settings_window и не гарантированно даже инициализированные к этому
+    моменту) — нужно передать цвета явно, иначе он до первого открытия
+    окна настроек будет рисоваться чёрным (стартовое значение S_ACCENT/
+    S_BORDER в settings_window — буквально "#000000").
+    """
+    def __init__(self, parent=None, accent=None, track_off=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(36, 20)
+        self._accent_override = accent
+        self._track_off_override = track_off
+        # Без фокуса клавиатуры Qt нечего обводить рамкой после клика мышью —
+        # клик и toggled по-прежнему работают, фокус тут и не нужен.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        track_height = 20
+        track_width = 36
+        knob_size = 14
+        margin = 3
+
+        accent    = self._accent_override or S_ACCENT
+        track_off = self._track_off_override or S_BORDER
+
+        if self.isChecked():
+            painter.setBrush(QColor(accent))
+        else:
+            painter.setBrush(QColor(track_off))
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(0, 0, track_width, track_height, 10, 10)
+
+        painter.setBrush(QColor('#ffffff'))
+        if self.isChecked():
+            knob_x = track_width - knob_size - margin
+        else:
+            knob_x = margin
+
+        painter.drawEllipse(int(knob_x), margin, knob_size, knob_size)
+
+
+class CheckMark(QAbstractButton):
+    """Чекбокс с иконкой-галочкой Material Design вместо стандартной
+    закрашенной рамки Qt (некрасивый нативный QCheckBox::indicator).
+
+    Глиф красится программно через _contrast_color() относительно
+    фактического цвета фона плашки — а не хардкодится белым/чёрным —
+    поэтому одинаково хорошо виден и на тёмном, и на светлом акценте,
+    какой бы цвет темы ни выбрал пользователь.
+
+    По умолчанию берёт S_ACCENT/S_BORDER/S_TEXT из settings_window
+    (как и QToggleSwitch), но их можно переопределить параметрами
+    accent=/border=/text_color= — для использования в других окнах
+    со своей палитрой (см. QToggleSwitch и его accent=/track_off=)."""
+
+    _CHECK_GLYPH = '\ue5ca'  # 'check' в MaterialIcons-Regular.ttf (codepoint из шрифта, проверено)
+
+    def __init__(self, text='', parent=None, accent=None, border=None, text_color=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setText(text)
+        self._accent_override = accent
+        self._border_override = border
+        self._text_color_override = text_color
+        self._box = 18
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._icon_family = _material_icons_family()
+
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
+
+    def sizeHint(self):
+        fm = QFontMetrics(self.font())
+        text_w = fm.horizontalAdvance(self.text()) if self.text() else 0
+        extra = (10 + text_w) if self.text() else 0
+        h = max(self._box, fm.height()) + 6
+        w = self._box + 4 + extra
+        return QSize(w, h)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        box = self._box
+        y = (self.height() - box) // 2
+        rect = QRectF(1, y, box, box)
+
+        accent = self._accent_override or S_ACCENT
+        border = self._border_override or S_BORDER
+
+        if self.isChecked():
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(accent))
+            painter.drawRoundedRect(rect, 5, 5)
+
+            glyph_color = self._text_color_override or _contrast_color(accent)
+            if self._icon_family:
+                icon_font = QFont(self._icon_family)
+                icon_font.setPixelSize(max(10, int(box * 0.78)))
+                painter.setFont(icon_font)
+                painter.setPen(QColor(glyph_color))
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._CHECK_GLYPH)
+            else:
+                # Шрифт не нашёлся на диске — не оставляем пустую плашку без
+                # признака "включено", рисуем простую галочку линиями
+                pen = QPen(QColor(glyph_color))
+                pen.setWidthF(2.0)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                painter.setPen(pen)
+                path = QPainterPath()
+                path.moveTo(rect.left() + 4, rect.top() + box * 0.55)
+                path.lineTo(rect.left() + box * 0.42, rect.top() + box * 0.72)
+                path.lineTo(rect.left() + box - 4, rect.top() + box * 0.3)
+                painter.drawPath(path)
+        else:
+            pen = QPen(QColor(border))
+            pen.setWidthF(2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 4, 4)
+
+        if self.text():
+            painter.setPen(QColor(self._text_color_override or S_TEXT))
+            painter.setFont(self.font())
+            text_rect = self.rect().adjusted(box + 10, 0, 0, 0)
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text())
+
 class SettingsWindow(QDialog):
     """Окно настроек — современный тёмный дизайн с боковой навигацией."""
-
     _S = {
         'ru': {
             'title':          'Настройки',
@@ -150,6 +320,23 @@ class SettingsWindow(QDialog):
             'lib_series':     'Серия',
             'lib_toolbar':    'Панель инструментов',
             'lib_progress':   'Полоса прогресса',
+            'gfx_group':      'Графический backend (для разработчиков)',
+            'gfx_backend_label': 'Рендеринг Qt WebEngine',
+            'gfx_vulkan':     'Vulkan',
+            'gfx_opengl':     'OpenGL',
+            'gfx_d3d11':      'DirectX 11',
+            'gfx_restart_note': 'Изменение применится при следующем открытии книги (читалка запускается отдельным процессом — перезапускать всю программу не нужно).',
+            'gfx_active_now':   'Сейчас активен: {backend}',
+            'gfx_fallback_warn': '⚠️ {preferred} недоступен на этой системе (нет поддержки видеокартой/драйвером) — временно используется {active}.',
+            'gfx_auto_detect':   'Автоопределение поддержки GPU при запуске',
+            'gfx_auto_detect_note': 'Если отключить — программа всегда использует ваш выбор выше, даже если видеокарта/драйвер его не поддерживают (для тестирования).',
+            'online_search_toggle': 'Онлайн-поиск книг',
+            'online_search_toggle_note': 'Показывает в тулбаре библиотеки кнопку поиска книг на внешних сайтах-агрегаторах.',
+            'download_path_label': 'Папка для скачивания книг',
+            'download_path_note': 'Книги, найденные через онлайн-поиск, сохраняются сюда автоматически, без диалога выбора файла.',
+            'download_path_browse': 'Обзор…',
+            'download_path_reset': 'По умолчанию',
+            'download_path_dialog_title': 'Выберите папку для скачивания',
         },
         'en': {
             'title':          'Settings',
@@ -225,35 +412,44 @@ class SettingsWindow(QDialog):
             'lib_series':     'Series',
             'lib_toolbar':    'Toolbar',
             'lib_progress':   'Progress bar',
+            'gfx_group':      'Graphics backend (developer)',
+            'gfx_backend_label': 'Qt WebEngine rendering',
+            'gfx_vulkan':     'Vulkan',
+            'gfx_opengl':     'OpenGL',
+            'gfx_d3d11':      'DirectX 11',
+            'gfx_restart_note': 'Takes effect the next time you open a book (the reader runs as a separate process — no need to restart the whole app).',
+            'gfx_active_now':   'Currently active: {backend}',
+            'gfx_fallback_warn': '⚠️ {preferred} is not supported on this system (no GPU/driver support) — temporarily using {active}.',
+            'gfx_auto_detect':   'Auto-detect GPU support on launch',
+            'gfx_auto_detect_note': 'If disabled, the program always uses your selection above, even if the GPU/driver doesn\'t support it (for testing).',
+            'online_search_toggle': 'Online book search',
+            'online_search_toggle_note': 'Shows the online book search button (external aggregator sites) in the library toolbar.',
+            'download_path_label': 'Book download folder',
+            'download_path_note': 'Books found via online search are saved here automatically, without a file-choice dialog.',
+            'download_path_browse': 'Browse…',
+            'download_path_reset': 'Default',
+            'download_path_dialog_title': 'Choose download folder',
         },
     }
 
     def __init__(self, config, reader_window=None, parent=None,
-                 lib_theme_callback=None):
+                 lib_theme_callback=None, online_search_changed_callback=None):
         super().__init__(parent if reader_window is None else reader_window)
-        # Обновляем палитру под текущую системную тему
         _refresh_palette()
-
-        # Пересчитываем стили с актуальной палитрой
         self._build_styles()
-
         self.config = config
         self.reader_window = reader_window
         self._loading = False
         self._lib_theme_callback = lib_theme_callback
+        self._online_search_changed_cb = online_search_changed_callback
         self._nav_buttons = []
-
         self.setMinimumSize(680, 520)
-        self.resize(720, 560)
+        self.resize(870, 700)
         self.setModal(False)
         self.setWindowTitle('')
-
-        # Синхронизируем цвета с темой библиотеки ДО создания виджетов
-        # чтобы все inline-стили строились сразу с правильными цветами
         lib_theme = self.config.get('library_theme_name', 'dark')
         self._sync_theme_to_lib(lib_theme)
         self.setStyleSheet(self._STYLE_MAIN)
-
         self._setup_ui()
         self._load_settings()
         self._restore_font_selection()
@@ -267,11 +463,13 @@ QDialog {{
     color: {S_TEXT};
     font-family: 'Segoe UI', 'SF Pro Text', 'Helvetica Neue', sans-serif;
 }}
-QLabel {{ color: {S_TEXT}; background: transparent; }}
+QLabel {{ color: {S_TEXT}; background: transparent; outline: none; }}
+QWidget:focus {{ outline: none; }}
+QAbstractButton:focus {{ outline: none; border: none; }}
 QGroupBox {{
     border: 1px solid {S_BORDER}; border-radius: 8px; margin-top: 14px;
     padding: 14px 12px 10px 12px; font-weight: 600; color: {S_SUB};
-    font-size: 11px; letter-spacing: 0.8px; text-transform: uppercase;
+    font-size: 11px; letter-spacing: 0.8px;  text-transform: uppercase;
 }}
 QGroupBox::title {{
     subcontrol-origin: margin; left: 10px; padding: 0 4px; background: {S_BG};
@@ -294,12 +492,25 @@ QComboBox QAbstractItemView {{
     background: {S_SURFACE}; border: 1px solid {S_BORDER}; color: {S_TEXT};
     selection-background-color: {S_ACCENT}; outline: none;
 }}
-QCheckBox {{ color: {S_TEXT}; spacing: 8px; }}
-QCheckBox::indicator {{
-    width: 18px; height: 18px; border-radius: 4px;
-    border: 2px solid {S_BORDER}; background: {S_SURFACE};
+QCheckBox {{
+    color: {S_TEXT};
+    spacing: 12px;
 }}
-QCheckBox::indicator:checked {{ background: {S_ACCENT}; border-color: {S_ACCENT}; }}
+QCheckBox::indicator {{
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    border: 2px solid {S_BORDER};
+    background: {S_SURFACE};
+}}
+QCheckBox::indicator:checked {{
+    background: {S_ACCENT};
+    border-color: {S_ACCENT};
+    image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iOSIgdmlld0JveD0iMCAwIDEyIDkiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTEgNC41TDQuNSA4TDExIDEiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4=);
+}}
+QCheckBox::indicator:hover {{
+    border-color: {S_ACCENT};
+}}
 QRadioButton {{ color: {S_TEXT}; spacing: 8px; }}
 QRadioButton::indicator {{
     width: 16px; height: 16px; border-radius: 8px;
@@ -344,13 +555,19 @@ QPushButton {{
 }}
 """
         self._CARD_STYLE = f"""
-QFrame {{
+QFrame#SettingsCard {{
     background: {S_SURFACE}; border: 1px solid {S_BORDER}; border-radius: 8px;
 }}
 """
 
     def _card(self):
         w = QFrame()
+        # objectName — ключевая часть фикса: без него селектор "QFrame { ... }"
+        # каскадится на ВСЕ вложенные QFrame-наследники (включая QLabel и
+        # QScrollArea — оба наследники QFrame в самом Qt), и каждая подпись
+        # внутри карточки получала тот же фон+рамку, что и сама карточка.
+        # С #SettingsCard стиль применяется только к виджету с этим именем.
+        w.setObjectName("SettingsCard")
         w.setStyleSheet(self._CARD_STYLE)
         return w
 
@@ -360,11 +577,22 @@ QFrame {{
                           f"letter-spacing:1px; background:transparent;")
         return lbl
 
+    @staticmethod
+    def _contrast_color(bg_hex):
+        return _contrast_color(bg_hex)
+
     def _value_label(self, text):
         lbl = QLabel(text)
-        lbl.setStyleSheet(f"color:{S_ACCENT}; font-size:13px; font-weight:600; "
-                          f"background:transparent; min-width:48px;")
-        lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # Фон плашки — лёгкий акцентный оттенок поверх S_SURFACE, а не сам
+        # S_ACCENT напрямую: так плашка всегда отличима от карточки, даже
+        # если пользователь выберет ACCENT, совпадающий с фоном/текстом.
+        pill_bg = _blend(S_SURFACE, S_ACCENT, 0.22)
+        txt_color = self._contrast_color(pill_bg)
+        lbl.setStyleSheet(
+            f"color:{txt_color}; font-size:12px; font-weight:700; "
+            f"background:{pill_bg}; border-radius:9px; padding:3px 10px; min-width:40px;"
+        )
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         return lbl
 
     def _s(self, key):
@@ -381,21 +609,16 @@ QFrame {{
         self.config.set(key, value)
         self._js(f"window.applySettingFromPython && window.applySettingFromPython({json.dumps(key)}, {json.dumps(value)})")
 
-    # ── Навигация ─────────────────────────────────────────────────────────────
-
     def _switch_page(self, idx):
         self._stack.setCurrentIndex(idx)
         for i, btn in enumerate(self._nav_buttons):
             btn.setStyleSheet(self._NAV_ACTIVE_STYLE if i == idx else self._NAV_STYLE)
-
-    # ── Построение UI ─────────────────────────────────────────────────────────
 
     def _setup_ui(self):
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Боковая навигация ─────────────────────────────────────────────
         self._nav_panel = QWidget()
         self._nav_panel.setFixedWidth(168)
         self._nav_panel.setStyleSheet(f"background:{S_BG}; border-right:1px solid {S_BORDER};")
@@ -403,7 +626,6 @@ QFrame {{
         nav_layout.setContentsMargins(8, 20, 8, 16)
         nav_layout.setSpacing(2)
 
-        # Заголовок
         title_lbl = QLabel("NovaReader")
         title_lbl.setStyleSheet(f"color:{S_TEXT}; font-size:15px; font-weight:700; "
                                  f"padding:0 4px 16px 4px; background:transparent;")
@@ -416,18 +638,17 @@ QFrame {{
         nav_layout.addSpacing(8)
 
         nav_items = [
-            ('tab_font',      '𝐀  '),
-            ('tab_layout',    '⊞  '),
-            ('tab_highlight', '✏  '),
-            ('tab_theme',     '◑  '),
-            ('tab_tts',       '◎  '),
-            ('tab_screen',    '⊙  '),
-            ('tab_lang',      '⊕  '),
-            ('tab_lib_theme', '▦  '),
-            ('tab_dev',       '⚙  '),
+            ('tab_font',      '\U0001D400  '),   # 𝐀  MATHEMATICAL BOLD CAPITAL A
+            ('tab_layout',    '\u229E  '),        # ⊞  SQUARED PLUS
+            ('tab_highlight', '\u270F\uFE0E  '),  # ✏  PENCIL (текстовый режим, не эмодзи)
+            ('tab_theme',     '\u25D1  '),        # ◑  CIRCLE WITH RIGHT HALF BLACK
+            ('tab_tts',       '\u25CE  '),        # ◎  BULLSEYE
+            ('tab_screen',    '\u2299  '),        # ⊙  CIRCLED DOT OPERATOR
+            ('tab_lang',      '\u2295  '),        # ⊕  CIRCLED PLUS
+            ('tab_lib_theme', '\u25A6  '),        # ▦  SQUARE WITH ORTHOGONAL CROSSHATCH FILL
+            ('tab_dev',       '\u2699\uFE0E  '),  # ⚙  GEAR (текстовый режим, не цветной эмодзи)
         ]
         self._nav_keys = [k for k, _ in nav_items]
-
         for i, (key, icon) in enumerate(nav_items):
             btn = QPushButton(icon + self._s(key))
             btn.setStyleSheet(self._NAV_STYLE)
@@ -435,13 +656,11 @@ QFrame {{
             btn.clicked.connect(lambda _, idx=i: self._switch_page(idx))
             nav_layout.addWidget(btn)
             self._nav_buttons.append(btn)
-            # Скрываем пункт «Библиотека» если открыто из ридера
             if key == 'tab_lib_theme' and self.reader_window is not None:
                 btn.setVisible(False)
 
         nav_layout.addStretch()
 
-        # Кнопка закрыть внизу
         self._close_btn = QPushButton(self._s('close'))
         self._close_btn.setStyleSheet(self._BTN_ACCENT_STYLE)
         self._close_btn.clicked.connect(self.accept)
@@ -449,7 +668,6 @@ QFrame {{
 
         root.addWidget(self._nav_panel)
 
-        # ── Область контента ──────────────────────────────────────────────
         content_area = QWidget()
         content_area.setStyleSheet(f"background:{S_BG};")
         content_layout = QVBoxLayout(content_area)
@@ -474,7 +692,6 @@ QFrame {{
         self._switch_page(0)
 
     def _scroll_page(self, inner):
-        """Оборачивает виджет в QScrollArea."""
         sb = (f"background: transparent; border-radius: 3px; min-size: 20px;"
               f"background: {S_BORDER};")
         scroll = QScrollArea()
@@ -504,14 +721,12 @@ QFrame {{
         return scroll
 
     def _page_container(self, title_key):
-        """Страница с заголовком и scrollable content."""
         outer = QWidget()
         outer.setStyleSheet(f"background:{S_BG};")
         vbox = QVBoxLayout(outer)
         vbox.setContentsMargins(28, 24, 28, 24)
         vbox.setSpacing(16)
 
-        # Заголовок страницы
         h = QLabel(self._s(title_key))
         h.setStyleSheet(f"color:{S_TEXT}; font-size:20px; font-weight:700; background:transparent;")
         setattr(self, f'_page_title_{title_key}', h)
@@ -525,7 +740,6 @@ QFrame {{
         return outer, vbox
 
     def _slider_row(self, label_text, slider, value_lbl, unit=''):
-        """Строка: метка + слайдер + значение."""
         row = QWidget()
         row.setStyleSheet("background:transparent;")
         h = QHBoxLayout(row)
@@ -539,32 +753,20 @@ QFrame {{
         h.addWidget(value_lbl)
         return row
 
-    # ── Вспомогательные методы для шрифтов ───────────────────────────────────
-
     @staticmethod
     def _get_fonts_dir() -> Path:
-        """
-        Возвращает папку для пользовательских шрифтов.
-        Приоритет: ibc/fonts/ рядом с программой (если доступна запись),
-        иначе ~/.config/NovaReader/fonts/ (всегда доступна).
-        """
         if getattr(sys, 'frozen', False):
             primary = Path(sys.executable).parent / 'ibc' / 'fonts'
         else:
             primary = Path(__file__).parent / 'ibc' / 'fonts'
-
-        # Проверяем можем ли писать в primary
         try:
             primary.mkdir(parents=True, exist_ok=True)
-            # Пробуем создать временный файл
             test = primary / '.write_test'
             test.touch()
             test.unlink()
             return primary
         except (PermissionError, OSError):
             pass
-
-        # Fallback: пользовательская папка конфига
         import os
         if sys.platform == 'win32':
             base = Path(os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming'))
@@ -575,19 +777,15 @@ QFrame {{
         return fallback
 
     def _on_import_font(self):
-        """Открывает диалог выбора файла шрифта, копирует его в fonts/ и загружает."""
         flt = self._s('import_font_filter')
         paths, _ = QFileDialog.getOpenFileNames(
             self, self._s('import_font'), '', flt)
         if not paths:
             return
-
         fonts_dir = self._get_fonts_dir()
         fonts_dir.mkdir(parents=True, exist_ok=True)
-
         from PyQt6.QtGui import QFontDatabase
         imported, skipped, errors = [], [], []
-
         for src_path in paths:
             src = Path(src_path)
             dst = fonts_dir / src.name
@@ -604,8 +802,6 @@ QFrame {{
                     errors.append(src.name)
             except Exception as e:
                 errors.append(f'{src.name}: {e}')
-
-        # Показываем итог
         parts = []
         if imported:
             parts.append(f"✓ {self._s('import_font_ok')}: {', '.join(imported)}")
@@ -615,42 +811,31 @@ QFrame {{
             parts.append(f"✗ {self._s('import_font_err')}: {', '.join(errors)}")
         if parts:
             QMessageBox.information(self, self._s('import_font'), '\n'.join(parts))
-
         if imported:
             self.config.invalidate_font_cache()
             self._rebuild_font_combos()
 
     def _rebuild_font_combos(self):
-        """Перестраивает единый список шрифтов после импорта."""
         if not hasattr(self, '_font_list_layout') or not hasattr(self, '_font_btns'):
             return
-
         from config import Config as _Cfg
         user_fonts = self.config.get_user_fonts()
         if not user_fonts:
             user_fonts = [self.config.DEFAULT_FONT, 'Noto Sans', 'Roboto']
-
         serif  = [f for f in user_fonts if _Cfg.classify_font(f) == 'serif']
         sans   = [f for f in user_fonts if _Cfg.classify_font(f) == 'sans']
         other  = [f for f in user_fonts
                   if _Cfg.classify_font(f) not in ('serif', 'sans', 'mono', 'skip')]
         all_fonts = serif + sans + other
-
-        # Очищаем layout
         layout = self._font_list_layout
         while layout.count():
             item = layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._font_btns.clear()
-
         self._font_btns = self._build_font_list(
             layout, all_fonts, 'reader_font_family',
             self.config.get('reader_font_family', self.config.DEFAULT_FONT))
-
-    # ── Страница Шрифт ────────────────────────────────────────────────────────
-
-    # ── Вспомогательные методы для единого списка шрифтов ───────────────────
 
     def _font_item_style(self, selected: bool) -> str:
         bg  = S_ACCENT  if selected else 'transparent'
@@ -665,10 +850,8 @@ QFrame {{
         )
 
     def _build_font_list(self, container_layout, fonts, config_key, default):
-        """Заполняет layout кнопками шрифтов. Возвращает список кнопок."""
         btns = []
         cur = self.config.get(config_key, default)
-
         for fam in (fonts if fonts else [default]):
             btn = QPushButton(fam)
             btn.setCheckable(True)
@@ -677,25 +860,19 @@ QFrame {{
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(self._font_item_style(fam == cur))
             btns.append(btn)
-
             def _click(checked, f=fam, b=btn):
                 for ob in self._font_btns:
                     ob.setChecked(ob is b)
                     ob.setStyleSheet(self._font_item_style(ob is b))
                 self._on_font_family_changed(f, config_key)
-
             btn.clicked.connect(_click)
             container_layout.addWidget(btn)
-
         container_layout.addStretch()
         return btns
-
-    # ── Страница Шрифт ────────────────────────────────────────────────────────
 
     def _create_font_page(self):
         outer, vbox = self._page_container('tab_font')
 
-        # ── Карточка: размер + межстрочный ───────────────────────────────────
         card = self._card()
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 16, 16, 16)
@@ -708,7 +885,6 @@ QFrame {{
         self.font_size_slider.valueChanged.connect(self._on_font_size_changed)
         cl.addWidget(self._font_size_sec)
         cl.addWidget(self._slider_row('', self.font_size_slider, self.font_size_label))
-
         cl.addSpacing(4)
 
         self._lh_sec_lbl = self._section_label(self._s('line_height'))
@@ -721,25 +897,22 @@ QFrame {{
 
         vbox.addWidget(card)
 
-        # ── Карточка: единый список шрифтов ──────────────────────────────────
         from config import Config as _Cfg
         user_fonts = self.config.get_user_fonts()
         if not user_fonts:
             user_fonts = [self.config.DEFAULT_FONT, 'Noto Sans', 'Roboto']
 
-        # Все шрифты кроме иконочных: сначала serif, потом sans, остальные
         serif  = [f for f in user_fonts if _Cfg.classify_font(f) == 'serif']
         sans   = [f for f in user_fonts if _Cfg.classify_font(f) == 'sans']
         other  = [f for f in user_fonts
                   if _Cfg.classify_font(f) not in ('serif', 'sans', 'mono', 'skip')]
-        all_fonts = serif + sans + other   # mono пока отдельно не показываем
+        all_fonts = serif + sans + other
 
         font_card = self._card()
         fv = QVBoxLayout(font_card)
         fv.setContentsMargins(16, 16, 16, 16)
         fv.setSpacing(10)
 
-        # Заголовок + кнопка импорта в одной строке
         hdr = QWidget(); hdr.setStyleSheet('background:transparent;')
         hdr_h = QHBoxLayout(hdr); hdr_h.setContentsMargins(0, 0, 0, 0)
         self._font_reading_sec = self._section_label(self._s('reading_font'))
@@ -752,7 +925,6 @@ QFrame {{
         hdr_h.addWidget(self._import_font_btn)
         fv.addWidget(hdr)
 
-        # Прокручиваемый список
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -769,11 +941,9 @@ QFrame {{
         self._font_list_layout = QVBoxLayout(inner)
         self._font_list_layout.setContentsMargins(6, 6, 6, 6)
         self._font_list_layout.setSpacing(2)
-
         self._font_btns = self._build_font_list(
             self._font_list_layout, all_fonts, 'reader_font_family',
             self.config.get('reader_font_family', self.config.DEFAULT_FONT))
-
         scroll.setWidget(inner)
         scroll.setFixedHeight(220)
         fv.addWidget(scroll)
@@ -784,23 +954,19 @@ QFrame {{
 
     def _create_layout_page(self):
         outer, vbox = self._page_container('tab_layout')
-
         card = self._card()
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 16, 16, 16)
         cl.setSpacing(16)
 
-        # Режим страниц
         self._spread_sec = self._section_label(self._s('spread_mode'))
         cl.addWidget(self._spread_sec)
         self.spread_combo = QComboBox()
         self.spread_combo.addItems(['Авто', 'Одна страница', 'Две страницы'])
         self.spread_combo.currentTextChanged.connect(self._on_spread_mode_changed)
         cl.addWidget(self.spread_combo)
-
         cl.addSpacing(4)
 
-        # Поля
         self._margin_sec = self._section_label(self._s('page_margin'))
         self.margin_slider = QSlider(Qt.Orientation.Horizontal)
         self.margin_slider.setRange(0, 120)
@@ -813,16 +979,14 @@ QFrame {{
         vbox.addStretch()
         return self._scroll_page(outer)
 
-    # ── Страница Подсветка ────────────────────────────────────────────────────
-
     def _create_highlight_page(self):
         outer, vbox = self._page_container('tab_highlight')
 
-        # Стиль выделения
         card1 = self._card()
         c1 = QVBoxLayout(card1)
         c1.setContentsMargins(16, 16, 16, 16)
         c1.setSpacing(10)
+
         self._hl_sec = self._section_label(self._s('hl_style'))
         c1.addWidget(self._hl_sec)
         self.style_combo = QComboBox()
@@ -831,14 +995,13 @@ QFrame {{
         c1.addWidget(self.style_combo)
         vbox.addWidget(card1)
 
-        # Цвет TTS
         card2 = self._card()
         c2 = QVBoxLayout(card2)
         c2.setContentsMargins(16, 16, 16, 16)
         c2.setSpacing(12)
+
         self._tts_sec = self._section_label(self._s('tts_color'))
         c2.addWidget(self._tts_sec)
-
         self._tts_color_defs = [
             ('Голубой',  '#00CED1', 'cyan'),
             ('Красный',  '#f28b82', 'red'),
@@ -872,25 +1035,21 @@ QFrame {{
         vbox.addStretch()
         return self._scroll_page(outer)
 
-    # ── Страница Тема ─────────────────────────────────────────────────────────
-
     def _create_theme_page(self):
         outer, vbox = self._page_container('tab_theme')
 
-        # Готовые темы — карточки-кнопки
         card1 = self._card()
         c1 = QVBoxLayout(card1)
         c1.setContentsMargins(16, 16, 16, 16)
         c1.setSpacing(12)
+
         self._theme_sec = self._section_label(self._s('themes'))
         c1.addWidget(self._theme_sec)
-
         themes_row = QWidget()
         themes_row.setStyleSheet("background:transparent;")
         tr = QHBoxLayout(themes_row)
         tr.setContentsMargins(0, 0, 0, 0)
         tr.setSpacing(8)
-
         self._theme_preset_btns = {}
         presets = [
             ('light', '#f4ecd8', '#5b4636', 'Светлая'),
@@ -911,7 +1070,6 @@ QFrame {{
             tr.addWidget(btn)
             self._theme_preset_btns[key] = btn
 
-        # Кастомная тема
         btn_custom = QPushButton(self._s('theme_custom'))
         btn_custom.setCheckable(True)
         btn_custom.setFixedHeight(52)
@@ -924,18 +1082,16 @@ QFrame {{
         btn_custom.clicked.connect(lambda _: self._on_preset_theme('custom'))
         tr.addWidget(btn_custom)
         self._theme_preset_btns['custom'] = btn_custom
-
         c1.addWidget(themes_row)
         vbox.addWidget(card1)
 
-        # Пользовательские цвета
         self.custom_card = self._card()
         c2 = QVBoxLayout(self.custom_card)
         c2.setContentsMargins(16, 16, 16, 16)
         c2.setSpacing(12)
+
         self._custom_sec = self._section_label(self._s('custom_colors'))
         c2.addWidget(self._custom_sec)
-
         for attr, key in [('bg', 'bg_label'), ('text', 'text_label')]:
             row = QWidget()
             row.setStyleSheet("background:transparent;")
@@ -958,36 +1114,30 @@ QFrame {{
             rh.addWidget(btn)
             rh.addStretch()
             c2.addWidget(row)
-
         self.bg_btn.clicked.connect(self._on_bg_selected)
         self.text_btn.clicked.connect(self._on_text_selected)
         vbox.addWidget(self.custom_card)
+
         vbox.addStretch()
         return self._scroll_page(outer)
 
     def _on_preset_theme(self, key):
-        # Снять все остальные
         for k, b in self._theme_preset_btns.items():
             b.setChecked(k == key)
-
         name_ru = {'light': 'Светлая', 'dark': 'Тёмная', 'sepia': 'Сепия', 'custom': 'Пользовательская'}
         self.config.set('theme_name', name_ru.get(key, 'Светлая'))
         self.custom_card.setVisible(key == 'custom')
-
         if key == 'custom':
             bg   = self.config.get('custom_bg',  self.config.get('theme_bg',   '#f4ecd8'))
             text = self.config.get('custom_text', self.config.get('theme_text', '#5b4636'))
         else:
             presets = {'light': ('#f4ecd8','#5b4636'), 'dark': ('#1a1a1a','#e0e0e0'), 'sepia': ('#fbf0d9','#5f4b3a')}
             bg, text = presets[key]
-
         self.config.set('theme_bg', bg)
         self.config.set('theme_text', text)
         self._update_color_previews(bg, text)
         if not self._loading:
             self._js(f"window.applySettingFromPython && window.applySettingFromPython('theme', {{bg:{json.dumps(bg)},text:{json.dumps(text)}}})")
-
-    # ── Страница TTS ──────────────────────────────────────────────────────────
 
     def _create_tts_page(self):
         outer = QWidget()
@@ -1010,25 +1160,44 @@ QFrame {{
         vbox.addWidget(self.piper_voices_widget, 1)
         return outer
 
-    # ── Страница Экран ────────────────────────────────────────────────────────
-
     def _create_screen_page(self):
         outer, vbox = self._page_container('tab_screen')
-
         card = self._card()
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 16, 16, 16)
         cl.setSpacing(14)
 
-        self.screen_inhibit_cb = QCheckBox(self._s('screen_inhibit'))
-        self.screen_inhibit_cb.setChecked(self.config.get('screen_inhibit', False))
-        self.screen_inhibit_cb.toggled.connect(self._on_screen_inhibit_toggled)
-        cl.addWidget(self.screen_inhibit_cb)
+        # Переключатель (toggle switch)
+        self.screen_inhibit_toggle = QToggleSwitch()
+        self.screen_inhibit_toggle.setChecked(self.config.get('screen_inhibit', False))
+        self.screen_inhibit_toggle.toggled.connect(self._on_screen_inhibit_toggled)
 
-        self.cursor_autohide_cb = QCheckBox(self._s('cursor_autohide'))
-        self.cursor_autohide_cb.setChecked(self.config.get('cursor_autohide', True))
-        self.cursor_autohide_cb.toggled.connect(self._on_cursor_autohide_toggled)
-        cl.addWidget(self.cursor_autohide_cb)
+        row1 = QWidget()
+        row1.setStyleSheet("background:transparent;")
+        rh1 = QHBoxLayout(row1)
+        rh1.setContentsMargins(0, 0, 0, 0)
+        rh1.addWidget(self.screen_inhibit_toggle)
+        self._screen_inhibit_label = QLabel(self._s('screen_inhibit'))
+        self._screen_inhibit_label.setStyleSheet(f"color:{S_TEXT}; font-size:13px; background:transparent;")
+        rh1.addWidget(self._screen_inhibit_label)
+        rh1.addStretch()
+        cl.addWidget(row1)
+
+        # Переключатель (toggle switch)
+        self.cursor_autohide_toggle = QToggleSwitch()
+        self.cursor_autohide_toggle.setChecked(self.config.get('cursor_autohide', True))
+        self.cursor_autohide_toggle.toggled.connect(self._on_cursor_autohide_toggled)
+
+        row2 = QWidget()
+        row2.setStyleSheet("background:transparent;")
+        rh2 = QHBoxLayout(row2)
+        rh2.setContentsMargins(0, 0, 0, 0)
+        rh2.addWidget(self.cursor_autohide_toggle)
+        self._cursor_autohide_label = QLabel(self._s('cursor_autohide'))
+        self._cursor_autohide_label.setStyleSheet(f"color:{S_TEXT}; font-size:13px; background:transparent;")
+        rh2.addWidget(self._cursor_autohide_label)
+        rh2.addStretch()
+        cl.addWidget(row2)
 
         sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setStyleSheet(f"background:{S_BORDER};")
@@ -1057,11 +1226,8 @@ QFrame {{
         vbox.addStretch()
         return self._scroll_page(outer)
 
-    # ── Страница Язык ─────────────────────────────────────────────────────────
-
     def _create_lang_page(self):
         outer, vbox = self._page_container('tab_lang')
-
         card = self._card()
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 16, 16, 16)
@@ -1085,6 +1251,7 @@ QFrame {{
         def _on_lang(code, on):
             if on:
                 self.config.set('language', code)
+                self._rebuild_pages()
                 self._apply_language()
 
         self._rb_ru.toggled.connect(lambda on: _on_lang('ru', on))
@@ -1096,33 +1263,68 @@ QFrame {{
         vbox.addStretch()
         return self._scroll_page(outer)
 
-    # ── Страница Библиотека ───────────────────────────────────────────────────
-
     def _create_lib_theme_page(self):
         from library_window import DARK_THEME, LIGHT_THEME
         from PyQt6.QtGui import QColor
-
         outer, vbox = self._page_container('tab_lib_theme')
 
-        # Переключатель тёмная/светлая/кастом
         card1 = self._card()
         c1 = QVBoxLayout(card1)
         c1.setContentsMargins(16, 16, 16, 16)
         c1.setSpacing(10)
+
         self._lib_theme_group = self._section_label(self._s('lib_theme_title'))
         c1.addWidget(self._lib_theme_group)
 
-        rb_row = QWidget(); rb_row.setStyleSheet("background:transparent;")
-        rbh = QHBoxLayout(rb_row); rbh.setContentsMargins(0,0,0,0); rbh.setSpacing(16)
-        self._lib_rb_group = QButtonGroup(rb_row)
-        self._lib_rb_dark   = QRadioButton()
-        self._lib_rb_light  = QRadioButton()
-        self._lib_rb_custom = QRadioButton()
-        for rb in (self._lib_rb_dark, self._lib_rb_light, self._lib_rb_custom):
-            self._lib_rb_group.addButton(rb)
-            rbh.addWidget(rb)
-        rbh.addStretch()
-        c1.addWidget(rb_row)
+        # Превьюшки-плитки, как в «Готовых темах» ридера (не чекбоксы)
+        from library_window import DARK_THEME as _LIB_DARK, LIGHT_THEME as _LIB_LIGHT
+        lib_themes_row = QWidget()
+        lib_themes_row.setStyleSheet("background:transparent;")
+        ltr = QHBoxLayout(lib_themes_row)
+        ltr.setContentsMargins(0, 0, 0, 0)
+        ltr.setSpacing(8)
+
+        lib_presets = [
+            ('dark',  _LIB_DARK['BG'],  _LIB_DARK['TEXT'],  'lib_dark'),
+            ('light', _LIB_LIGHT['BG'], _LIB_LIGHT['TEXT'], 'lib_light'),
+        ]
+        self._lib_theme_btns = {}
+        for key, bg, fg, s_key in lib_presets:
+            btn = QPushButton(self._s(s_key))
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(52)
+            btn.setStyleSheet(
+                f'QPushButton{{background:{bg};color:{fg};border-radius:8px;'
+                f'border:2px solid transparent;font-size:13px;font-weight:600;}}'
+                f'QPushButton:checked{{border:2px solid {S_ACCENT};}}'
+                f'QPushButton:hover{{border:2px solid rgba(79,142,247,0.5);}}'
+            )
+            ltr.addWidget(btn)
+            self._lib_theme_btns[key] = btn
+
+        btn_lib_custom = QPushButton(self._s('lib_custom'))
+        btn_lib_custom.setCheckable(True)
+        btn_lib_custom.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_lib_custom.setFixedHeight(52)
+        btn_lib_custom.setStyleSheet(
+            f'QPushButton{{background:{S_SURFACE};color:{S_TEXT};border-radius:8px;'
+            f'border:2px solid transparent;font-size:13px;}}'
+            f'QPushButton:checked{{border:2px solid {S_ACCENT};}}'
+            f'QPushButton:hover{{border:2px solid rgba(79,142,247,0.5);}}'
+        )
+        ltr.addWidget(btn_lib_custom)
+        self._lib_theme_btns['custom'] = btn_lib_custom
+
+        c1.addWidget(lib_themes_row)
+
+        # Те же имена атрибутов, что и раньше у чекбоксов — весь остальной код
+        # файла (_emit_lib_theme, _load_lib_settings и т.д.) работает с ними
+        # через общий для QCheckBox/QPushButton API (isChecked/setChecked/toggled)
+        # и трогать его не пришлось.
+        self._lib_cb_dark   = self._lib_theme_btns['dark']
+        self._lib_cb_light  = self._lib_theme_btns['light']
+        self._lib_cb_custom = self._lib_theme_btns['custom']
 
         copy_row = QWidget(); copy_row.setStyleSheet("background:transparent;")
         crh = QHBoxLayout(copy_row); crh.setContentsMargins(0,0,0,0); crh.setSpacing(8)
@@ -1136,15 +1338,14 @@ QFrame {{
         c1.addWidget(copy_row)
         vbox.addWidget(card1)
 
-        # Цветовые пикеры
         card2 = self._card()
         c2 = QVBoxLayout(card2)
         c2.setContentsMargins(16, 16, 16, 16)
         c2.setSpacing(8)
+
         self._lib_colors_group_lbl = self._section_label(self._s('lib_colors'))
         c2.addWidget(self._lib_colors_group_lbl)
-        self._lib_colors_group = card2  # для findChild
-
+        self._lib_colors_group = card2
         self._lib_color_keys = [
             ("BG","lib_bg"),("SURFACE","lib_surface"),("BORDER","lib_border"),
             ("ACCENT","lib_accent"),("TEXT","lib_text"),("SUB","lib_sub"),
@@ -1153,10 +1354,8 @@ QFrame {{
         self._lib_color_btns    = {}
         self._lib_color_preview = {}
         self._lib_custom_colors = {}
-
         grid_w = QWidget(); grid_w.setStyleSheet("background:transparent;")
         grid = QGridLayout(grid_w); grid.setContentsMargins(0,0,0,0); grid.setSpacing(6)
-
         for row, (key, s_key) in enumerate(self._lib_color_keys):
             lbl = QLabel(self._s(s_key))
             lbl.setObjectName(f"_lib_lbl_{key}")
@@ -1172,7 +1371,6 @@ QFrame {{
             grid.addWidget(btn,     row, 2)
             self._lib_color_btns[key]    = btn
             self._lib_color_preview[key] = preview
-
             def _on_pick(checked, k=key):
                 cur = self._lib_custom_colors.get(k, "#ffffff")
                 c = QColorDialog.getColor(QColor(cur), self)
@@ -1180,24 +1378,30 @@ QFrame {{
                     self._lib_custom_colors[k] = c.name()
                     self._lib_color_preview[k].setStyleSheet(
                         f"background:{c.name()};border-radius:12px;border:2px solid {S_BORDER};")
-                    if self._lib_rb_custom.isChecked():
+                    if self._lib_cb_custom.isChecked():
                         self._emit_lib_theme()
             btn.clicked.connect(_on_pick)
-
         c2.addWidget(grid_w)
         vbox.addWidget(card2)
+
         vbox.addStretch()
 
-        # Сигналы
-        self._lib_rb_dark.toggled.connect(lambda on: on and self._on_lib_theme_radio("dark"))
-        self._lib_rb_light.toggled.connect(lambda on: on and self._on_lib_theme_radio("light"))
-        self._lib_rb_custom.toggled.connect(lambda on: on and self._on_lib_theme_radio("custom"))
+        def _on_theme_checkbox_changed(checked_cb):
+            if checked_cb.isChecked():
+                for cb in [self._lib_cb_dark, self._lib_cb_light, self._lib_cb_custom]:
+                    if cb is not checked_cb:
+                        cb.setChecked(False)
+                self._emit_lib_theme()
+
+        self._lib_cb_dark.toggled.connect(lambda: _on_theme_checkbox_changed(self._lib_cb_dark))
+        self._lib_cb_light.toggled.connect(lambda: _on_theme_checkbox_changed(self._lib_cb_light))
+        self._lib_cb_custom.toggled.connect(lambda: _on_theme_checkbox_changed(self._lib_cb_custom))
 
         def _copy_from(src):
             self._lib_custom_colors = dict(src)
             self._update_lib_color_previews()
-            if self._lib_rb_custom.isChecked(): self._emit_lib_theme()
-            else: self._lib_rb_custom.setChecked(True)
+            if self._lib_cb_custom.isChecked(): self._emit_lib_theme()
+            else: self._lib_cb_custom.setChecked(True)
 
         def _copy_sys():
             from PyQt6.QtWidgets import QApplication
@@ -1219,20 +1423,28 @@ QFrame {{
 
         return self._scroll_page(outer)
 
-    # ── Страница Разработчик ──────────────────────────────────────────────────
-
     def _create_dev_page(self):
         outer, vbox = self._page_container('tab_dev')
-
         card = self._card()
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 16, 16, 16)
         cl.setSpacing(12)
 
-        self.debug_checkbox = QCheckBox(self._s('debug_log'))
-        self.debug_checkbox.setChecked(self.config.get('debug_log', False))
-        self.debug_checkbox.toggled.connect(self._on_debug_toggled)
-        cl.addWidget(self.debug_checkbox)
+        # Переключатель (toggle switch)
+        self.debug_toggle = QToggleSwitch()
+        self.debug_toggle.setChecked(self.config.get('debug_log', False))
+        self.debug_toggle.toggled.connect(self._on_debug_toggled)
+
+        row1 = QWidget()
+        row1.setStyleSheet("background:transparent;")
+        rh1 = QHBoxLayout(row1)
+        rh1.setContentsMargins(0, 0, 0, 0)
+        rh1.addWidget(self.debug_toggle)
+        self._debug_log_label = QLabel(self._s('debug_log'))
+        self._debug_log_label.setStyleSheet(f"color:{S_TEXT}; font-size:13px; background:transparent;")
+        rh1.addWidget(self._debug_log_label)
+        rh1.addStretch()
+        cl.addWidget(row1)
 
         self._log_path_label = QLabel()
         self._log_path_label.setStyleSheet(f'color:{S_SUB}; font-size:11px; background:transparent;')
@@ -1240,21 +1452,151 @@ QFrame {{
         cl.addWidget(self._log_path_label)
 
         vbox.addWidget(card)
+
+        if self.reader_window is None:
+            search_card = self._card()
+            sl = QVBoxLayout(search_card)
+            sl.setContentsMargins(16, 16, 16, 16)
+            sl.setSpacing(10)
+
+            self.online_search_toggle = QToggleSwitch()
+            self.online_search_toggle.setChecked(self.config.get('online_search_enabled', False))
+            self.online_search_toggle.toggled.connect(self._on_online_search_toggled)
+
+            row3 = QWidget()
+            row3.setStyleSheet("background:transparent;")
+            rh3 = QHBoxLayout(row3)
+            rh3.setContentsMargins(0, 0, 0, 0)
+            rh3.addWidget(self.online_search_toggle)
+            self._online_search_label = QLabel(self._s('online_search_toggle'))
+            self._online_search_label.setStyleSheet(f"color:{S_TEXT}; font-size:13px; background:transparent;")
+            rh3.addWidget(self._online_search_label)
+            rh3.addStretch()
+            sl.addWidget(row3)
+
+            self._online_search_note = QLabel(self._s('online_search_toggle_note'))
+            self._online_search_note.setStyleSheet(f'color:{S_SUB}; font-size:11px; background:transparent;')
+            self._online_search_note.setWordWrap(True)
+            sl.addWidget(self._online_search_note)
+
+            vbox.addWidget(search_card)
+
+            dl_card = self._card()
+            self._dl_card = dl_card
+            dl_card.setVisible(self.config.get('online_search_enabled', False))
+            dll = QVBoxLayout(dl_card)
+            dll.setContentsMargins(16, 16, 16, 16)
+            dll.setSpacing(10)
+
+            self._download_path_sec = self._section_label(self._s('download_path_label'))
+            dll.addWidget(self._download_path_sec)
+
+            self._download_path_value = QLabel(str(self.config.get_download_path()))
+            self._download_path_value.setStyleSheet(f'color:{S_TEXT}; font-size:12px; background:transparent;')
+            self._download_path_value.setWordWrap(True)
+            dll.addWidget(self._download_path_value)
+
+            dl_btn_row = QHBoxLayout()
+            dl_btn_row.setSpacing(8)
+            self._download_path_browse_btn = QPushButton(self._s('download_path_browse'))
+            self._download_path_browse_btn.setStyleSheet(self._BTN_STYLE)
+            self._download_path_browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._download_path_browse_btn.clicked.connect(self._on_browse_download_path)
+            dl_btn_row.addWidget(self._download_path_browse_btn)
+
+            self._download_path_reset_btn = QPushButton(self._s('download_path_reset'))
+            self._download_path_reset_btn.setStyleSheet(self._BTN_STYLE)
+            self._download_path_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._download_path_reset_btn.clicked.connect(self._on_reset_download_path)
+            dl_btn_row.addWidget(self._download_path_reset_btn)
+            dl_btn_row.addStretch()
+            dll.addLayout(dl_btn_row)
+
+            self._download_path_note = QLabel(self._s('download_path_note'))
+            self._download_path_note.setStyleSheet(f'color:{S_SUB}; font-size:11px; background:transparent;')
+            self._download_path_note.setWordWrap(True)
+            dll.addWidget(self._download_path_note)
+
+            vbox.addWidget(dl_card)
+
+        if self.reader_window is None:
+            gfx_card = self._card()
+            gl = QVBoxLayout(gfx_card)
+            gl.setContentsMargins(16, 16, 16, 16)
+            gl.setSpacing(10)
+
+            self._gfx_sec = self._section_label(self._s('gfx_backend_label'))
+            gl.addWidget(self._gfx_sec)
+            self.gfx_combo = QComboBox()
+            if sys.platform == 'win32':
+                self._gfx_options = [('d3d11', self._s('gfx_d3d11')), ('opengl', self._s('gfx_opengl')), ('vulkan', self._s('gfx_vulkan'))]
+                current = self.config.get('windows_graphics_backend', 'd3d11')
+            else:
+                self._gfx_options = [('vulkan', self._s('gfx_vulkan')), ('opengl', self._s('gfx_opengl'))]
+                current = self.config.get('linux_graphics_backend', 'vulkan')
+            self.gfx_combo.addItems([label for _, label in self._gfx_options])
+            keys = [k for k, _ in self._gfx_options]
+            try:
+                self.gfx_combo.setCurrentIndex(keys.index(current))
+            except ValueError:
+                self.gfx_combo.setCurrentIndex(0)
+            self.gfx_combo.currentIndexChanged.connect(self._on_gfx_backend_changed)
+            gl.addWidget(self.gfx_combo)
+
+            self._gfx_status = QLabel()
+            self._gfx_status.setWordWrap(True)
+            gl.addWidget(self._gfx_status)
+            self._update_gfx_status()
+
+            self._gfx_note = QLabel(self._s('gfx_restart_note'))
+            self._gfx_note.setStyleSheet(f'color:{S_SUB}; font-size:11px; background:transparent;')
+            self._gfx_note.setWordWrap(True)
+            gl.addWidget(self._gfx_note)
+
+            # Переключатель (toggle switch)
+            self.gfx_auto_toggle = QToggleSwitch()
+            self.gfx_auto_toggle.setChecked(self.config.get('gfx_auto_detect', True))
+            self.gfx_auto_toggle.toggled.connect(self._on_gfx_auto_detect_toggled)
+
+            row2 = QWidget()
+            row2.setStyleSheet("background:transparent;")
+            rh2 = QHBoxLayout(row2)
+            rh2.setContentsMargins(0, 0, 0, 0)
+            rh2.addWidget(self.gfx_auto_toggle)
+            self._gfx_auto_detect_label = QLabel(self._s('gfx_auto_detect'))
+            self._gfx_auto_detect_label.setStyleSheet(f"color:{S_TEXT}; font-size:13px; background:transparent;")
+            rh2.addWidget(self._gfx_auto_detect_label)
+            rh2.addStretch()
+            gl.addWidget(row2)
+
+            self._gfx_auto_note = QLabel(self._s('gfx_auto_detect_note'))
+            self._gfx_auto_note.setStyleSheet(f'color:{S_SUB}; font-size:11px; background:transparent;')
+            self._gfx_auto_note.setWordWrap(True)
+            gl.addWidget(self._gfx_auto_note)
+
+            vbox.addWidget(gfx_card)
+
         vbox.addStretch()
         return self._scroll_page(outer)
-
-    # ── Применение языка ──────────────────────────────────────────────────────
 
     def _apply_language(self):
         self.setWindowTitle(self._s('title'))
         self._close_btn.setText(self._s('close'))
-
         nav_keys = ['tab_font','tab_layout','tab_highlight','tab_theme','tab_tts',
                     'tab_screen','tab_lang','tab_lib_theme','tab_dev']
-        icons = ['𝐀  ','⊞  ','✏  ','◑  ','◎  ','⊙  ','⊕  ','▦  ','⚙  ']
+        icons = ['\U0001D400  ', '\u229E  ', '\u270F\uFE0E  ', '\u25D1  ',
+                 '\u25CE  ', '\u2299  ', '\u2295  ', '\u25A6  ', '\u2699\uFE0E  ']
         for btn, key, icon in zip(self._nav_buttons, nav_keys, icons):
             cur = btn.styleSheet()
             btn.setText(icon + self._s(key))
+
+        # Заголовки самих страниц ("Шрифт"/"Font", "Макет"/"Layout" и т.д.) —
+        # раньше переводились только при первом построении страницы и никогда
+        # не обновлялись при переключении языка на лету.
+        for key in nav_keys:
+            title_lbl = getattr(self, f'_page_title_{key}', None)
+            if title_lbl is not None:
+                title_lbl.setText(self._s(key))
 
         spread = self.config.get('spread_mode', 'auto')
         self.spread_combo.blockSignals(True)
@@ -1272,13 +1614,50 @@ QFrame {{
         self.style_combo.setCurrentText(hlm.get(hl, self._s('hl_fill')))
         self.style_combo.blockSignals(False)
 
-        self.screen_inhibit_cb.setText(self._s('screen_inhibit'))
-        self.cursor_autohide_cb.setText(self._s('cursor_autohide'))
+        if hasattr(self, '_screen_inhibit_label'):
+            self._screen_inhibit_label.setText(self._s('screen_inhibit'))
+        if hasattr(self, '_cursor_autohide_label'):
+            self._cursor_autohide_label.setText(self._s('cursor_autohide'))
         self._screen_timeout_label.setText(self._s('screen_timeout'))
         self._lang_note.setText(self._s('lang_note'))
-        self.debug_checkbox.setText(self._s('debug_log'))
+        if hasattr(self, '_debug_log_label'):
+            self._debug_log_label.setText(self._s('debug_log'))
         self._log_path_label.setText(
             self._s('log_path') + '\n' + str(self.config.config_dir / 'debug.log'))
+
+        if hasattr(self, '_gfx_sec'):
+            self._gfx_sec.setText(self._s('gfx_backend_label'))
+        if hasattr(self, '_gfx_note'):
+            self._gfx_note.setText(self._s('gfx_restart_note'))
+        if hasattr(self, '_gfx_auto_detect_label'):
+            self._gfx_auto_detect_label.setText(self._s('gfx_auto_detect'))
+        if hasattr(self, '_gfx_auto_note'):
+            self._gfx_auto_note.setText(self._s('gfx_auto_detect_note'))
+        if hasattr(self, '_online_search_label'):
+            self._online_search_label.setText(self._s('online_search_toggle'))
+        if hasattr(self, '_online_search_note'):
+            self._online_search_note.setText(self._s('online_search_toggle_note'))
+        if hasattr(self, '_download_path_sec'):
+            self._download_path_sec.setText(self._s('download_path_label'))
+        if hasattr(self, '_download_path_browse_btn'):
+            self._download_path_browse_btn.setText(self._s('download_path_browse'))
+        if hasattr(self, '_download_path_reset_btn'):
+            self._download_path_reset_btn.setText(self._s('download_path_reset'))
+        if hasattr(self, '_download_path_note'):
+            self._download_path_note.setText(self._s('download_path_note'))
+
+        if hasattr(self, 'gfx_combo') and hasattr(self, '_gfx_options'):
+            current_index = self.gfx_combo.currentIndex()
+            self.gfx_combo.blockSignals(True)
+            self.gfx_combo.clear()
+            key_map = dict(self._gfx_options)
+            keys = list(key_map.keys())
+            labels = {'vulkan': self._s('gfx_vulkan'), 'opengl': self._s('gfx_opengl'), 'd3d11': self._s('gfx_d3d11')}
+            self._gfx_options = [(k, labels[k]) for k in keys]
+            self.gfx_combo.addItems([label for _, label in self._gfx_options])
+            self.gfx_combo.setCurrentIndex(current_index)
+            self.gfx_combo.blockSignals(False)
+            self._update_gfx_status()
 
         if hasattr(self, '_import_font_btn'):
             self._import_font_btn.setText('+ ' + self._s('import_font'))
@@ -1290,23 +1669,21 @@ QFrame {{
         self.bg_btn.setText(self._s('choose'))
         self.text_btn.setText(self._s('choose'))
 
-        self._lib_rb_dark.setText(self._s('lib_dark'))
-        self._lib_rb_light.setText(self._s('lib_light'))
-        self._lib_rb_custom.setText(self._s('lib_custom'))
-        self._lib_copy_dark_btn.setText(self._s('lib_copy_dark'))
-        self._lib_copy_light_btn.setText(self._s('lib_copy_light'))
-        self._lib_copy_sys_btn.setText(self._s('lib_copy_sys'))
+        if hasattr(self, '_lib_cb_dark'):
+            self._lib_cb_dark.setText(self._s('lib_dark'))
+            self._lib_cb_light.setText(self._s('lib_light'))
+            self._lib_cb_custom.setText(self._s('lib_custom'))
+        if hasattr(self, '_lib_copy_dark_btn'):
+            self._lib_copy_dark_btn.setText(self._s('lib_copy_dark'))
+            self._lib_copy_light_btn.setText(self._s('lib_copy_light'))
+            self._lib_copy_sys_btn.setText(self._s('lib_copy_sys'))
         for key, s_key in self._lib_color_keys:
             lbl = self._lib_colors_group.findChild(QLabel, f"_lib_lbl_{key}")
             if lbl: lbl.setText(self._s(s_key))
             btn = self._lib_color_btns.get(key)
             if btn: btn.setText(self._s('choose'))
 
-    # ── Загрузка настроек ─────────────────────────────────────────────────────
-
     def _restore_font_selection(self):
-        """Выделяет кнопку шрифта, соответствующую сохранённому значению.
-        Вызывается после _setup_ui — когда кнопки уже созданы."""
         saved = self.config.get('reader_font_family', '')
         if not saved or not hasattr(self, '_font_btns'):
             return
@@ -1321,23 +1698,18 @@ QFrame {{
             fs = int(self.config.get('font_size', 16))
             self.font_size_slider.setValue(fs)
             self.font_size_label.setText(f'{fs}px')
-
             lh = float(self.config.get('line_height', 1.5))
             self.line_height_slider.setValue(int(lh * 10))
             self.line_height_label.setText(f'{lh:.1f}')
-
             margin = int(self.config.get('page_margin', 44))
             self.margin_slider.setValue(margin)
             self.margin_label.setText(f'{margin}px')
-
             saved_tts_color = self.config.get('tts_highlight_color', 'cyan')
             for btn, val in self.tts_color_buttons:
                 btn.setChecked(val == saved_tts_color)
-
             bg   = self.config.get('theme_bg', '#f4ecd8')
             text = self.config.get('theme_text', '#5b4636')
             self._update_color_previews(bg, text)
-
             saved_theme = self.config.get('theme_name', None)
             _rev = {'Светлая':'light','Light':'light','Тёмная':'dark','Dark':'dark',
                     'Сепия':'sepia','Sepia':'sepia','Пользовательская':'custom','Custom':'custom'}
@@ -1346,13 +1718,9 @@ QFrame {{
             for k, b in self._theme_preset_btns.items():
                 b.setChecked(k == theme_key)
             self.custom_card.setVisible(theme_key == 'custom')
-
         finally:
             self._loading = False
-
         self._load_lib_settings()
-
-    # ── Обработчики ───────────────────────────────────────────────────────────
 
     def _on_font_family_changed(self, family: str, key: str = 'reader_font_family'):
         self._save(key, family)
@@ -1398,7 +1766,7 @@ QFrame {{
         self.bg_preview.setStyleSheet(f'background:{bg}; border-radius:14px; border:2px solid {S_BORDER};')
         self.text_preview.setStyleSheet(f'background:{text}; border-radius:14px; border:2px solid {S_BORDER};')
 
-    def _on_theme_changed(self, theme): pass  # заменён _on_preset_theme
+    def _on_theme_changed(self, theme): pass
 
     def _on_bg_selected(self):
         c = QColorDialog.getColor(QColor(self.config.get('custom_bg', self.config.get('theme_bg','#f4ecd8'))), self)
@@ -1430,12 +1798,67 @@ QFrame {{
         if hasattr(self,'_screen_timeout_changed_cb') and self._screen_timeout_changed_cb:
             self._screen_timeout_changed_cb(minutes)
 
+    def _gfx_label_for(self, key: str) -> str:
+        labels = {'vulkan': self._s('gfx_vulkan'), 'opengl': self._s('gfx_opengl'), 'd3d11': self._s('gfx_d3d11')}
+        return labels.get(key, key)
+
+    def _update_gfx_status(self):
+        if not hasattr(self, '_gfx_status') or not hasattr(self, '_gfx_options'):
+            return
+        keys = [k for k, _ in self._gfx_options]
+        idx = self.gfx_combo.currentIndex()
+        preferred = keys[idx] if 0 <= idx < len(keys) else keys[0]
+        active = self.config.get('_active_graphics_backend', preferred)
+        if active != preferred:
+            self._gfx_status.setStyleSheet(f'color:#e0a030; font-size:11px; background:transparent;')
+            self._gfx_status.setText(self._s('gfx_fallback_warn').format(
+                preferred=self._gfx_label_for(preferred), active=self._gfx_label_for(active)))
+        else:
+            self._gfx_status.setStyleSheet(f'color:{S_SUB}; font-size:11px; background:transparent;')
+            self._gfx_status.setText(self._s('gfx_active_now').format(backend=self._gfx_label_for(active)))
+
+    def _on_gfx_auto_detect_toggled(self, checked):
+        self.config.set('gfx_auto_detect', checked)
+
+    def _on_gfx_backend_changed(self, index):
+        keys = [k for k, _ in self._gfx_options]
+        if index < 0 or index >= len(keys):
+            return
+        value = keys[index]
+        if sys.platform == 'win32':
+            self.config.set('windows_graphics_backend', value)
+        else:
+            self.config.set('linux_graphics_backend', value)
+        self._update_gfx_status()
+
     def _on_debug_toggled(self, checked):
         self.config.set('debug_log', checked)
         if checked: self._enable_debug_log()
         else: self._disable_debug_log()
         if hasattr(self,'_dev_mode_changed_cb') and self._dev_mode_changed_cb:
             self._dev_mode_changed_cb(checked)
+
+    def _on_online_search_toggled(self, checked):
+        self.config.set('online_search_enabled', checked)
+        if hasattr(self, '_dl_card'):
+            self._dl_card.setVisible(checked)
+        if self._online_search_changed_cb:
+            self._online_search_changed_cb(checked)
+
+    def _on_browse_download_path(self):
+        from library_window import _styled_get_existing_directory
+        current = str(self.config.get_download_path())
+        chosen = _styled_get_existing_directory(
+            self, self._s('download_path_dialog_title'), current, config=self.config)
+        if chosen:
+            self.config.set('download_path', chosen)
+            self._download_path_value.setText(str(self.config.get_download_path()))
+
+    def _on_reset_download_path(self):
+        from config import Config as _Cfg
+        default_path = str(_Cfg._get_default_download_dir())
+        self.config.set('download_path', default_path)
+        self._download_path_value.setText(str(self.config.get_download_path()))
 
     def _enable_debug_log(self):
         import sys, os
@@ -1462,8 +1885,6 @@ QFrame {{
         installed = self.piper_voices_widget.get_installed_voices()
         self._js(f"if(window._pushPiperVoices){{window._pushPiperVoices({json.dumps(installed)});}}")
 
-    # ── Тема библиотеки ───────────────────────────────────────────────────────
-
     def _load_lib_settings(self):
         from library_window import DARK_THEME, LIGHT_THEME
         name = self.config.get("library_theme_name", "dark")
@@ -1476,8 +1897,16 @@ QFrame {{
         else:
             self._lib_custom_colors = dict(DARK_THEME)
         self._update_lib_color_previews()
-        for rb, n in [(self._lib_rb_dark,"dark"),(self._lib_rb_light,"light"),(self._lib_rb_custom,"custom")]:
-            rb.blockSignals(True); rb.setChecked(name==n); rb.blockSignals(False)
+        if hasattr(self, '_lib_cb_dark'):
+            self._lib_cb_dark.blockSignals(True)
+            self._lib_cb_light.blockSignals(True)
+            self._lib_cb_custom.blockSignals(True)
+            self._lib_cb_dark.setChecked(name == "dark")
+            self._lib_cb_light.setChecked(name == "light")
+            self._lib_cb_custom.setChecked(name == "custom")
+            self._lib_cb_dark.blockSignals(False)
+            self._lib_cb_light.blockSignals(False)
+            self._lib_cb_custom.blockSignals(False)
         self._set_lib_pickers_enabled(name == "custom")
 
     def _update_lib_color_previews(self):
@@ -1489,19 +1918,47 @@ QFrame {{
         for btn in self._lib_color_btns.values():
             btn.setEnabled(enabled)
 
-    def _sync_theme_to_lib(self, theme_name: str):
-        """Перестраивает цвета окна настроек под выбранную тему библиотеки."""
-        from library_window import DARK_THEME, LIGHT_THEME
+    def _rebuild_pages(self):
+        """Полностью пересобирает все страницы _stack — так гарантированно
+        подхватываются актуальные S_* цвета (при смене темы) и актуальный
+        язык (при смене языка), включая все подписи/заголовки, которые
+        _apply_language() point-by-point не обновляет (их слишком много,
+        разбросаны по 9 страницам, и точечно гоняться за каждой — не
+        валидная стратегия, легко что-то забыть, как уже случалось)."""
+        if not hasattr(self, '_stack'):
+            return
+        cur_idx = self._stack.currentIndex()
+        while self._stack.count():
+            w = self._stack.widget(0)
+            self._stack.removeWidget(w)
+            w.deleteLater()
+        self._stack.addWidget(self._create_font_page())
+        self._stack.addWidget(self._create_layout_page())
+        self._stack.addWidget(self._create_highlight_page())
+        self._stack.addWidget(self._create_theme_page())
+        self._stack.addWidget(self._create_tts_page())
+        self._stack.addWidget(self._create_screen_page())
+        self._stack.addWidget(self._create_lang_page())
+        self._stack.addWidget(self._create_lib_theme_page())
+        self._stack.addWidget(self._create_dev_page())
+        self._stack.setCurrentIndex(cur_idx)
+        self._loading = True
+        try:
+            self._load_settings()
+        finally:
+            self._loading = False
+        self._restore_font_selection()
+        self._load_lib_settings()
 
+    def _sync_theme_to_lib(self, theme_name: str):
+        from library_window import DARK_THEME, LIGHT_THEME
         if theme_name == 'light':
             colors = LIGHT_THEME
         elif theme_name == 'custom':
-            # Берём из конфига — там актуальные пользовательские цвета
             colors = dict(DARK_THEME)
             colors.update(self.config.get('library_theme_custom', {}))
-        else:  # dark и всё остальное
+        else:
             colors = DARK_THEME
-
         global S_BG, S_SURFACE, S_BORDER, S_ACCENT, S_TEXT, S_SUB, S_HOVER, _P
         bg      = colors.get('BG',      DARK_THEME['BG'])
         surface = colors.get('SURFACE', DARK_THEME['SURFACE'])
@@ -1510,7 +1967,6 @@ QFrame {{
         text    = colors.get('TEXT',    DARK_THEME['TEXT'])
         sub     = colors.get('SUB',     DARK_THEME['SUB'])
         hover   = _blend(bg, text, 0.06)
-
         S_BG      = bg
         S_SURFACE = surface
         S_BORDER  = border
@@ -1520,11 +1976,8 @@ QFrame {{
         S_HOVER   = hover
         _P = dict(S_BG=bg, S_SURFACE=surface, S_BORDER=border,
                   S_ACCENT=accent, S_TEXT=text, S_SUB=sub, S_HOVER=hover)
-
         self._build_styles()
         self.setStyleSheet(self._STYLE_MAIN)
-
-        # Обновляем стили боковой навигации
         if hasattr(self, '_nav_panel'):
             self._nav_panel.setStyleSheet(
                 f"background:{S_BG}; border-right:1px solid {S_BORDER};")
@@ -1533,35 +1986,9 @@ QFrame {{
                 btn.setStyleSheet(self._NAV_STYLE)
         if hasattr(self, '_close_btn'):
             self._close_btn.setStyleSheet(self._BTN_ACCENT_STYLE)
-
-        # Если виджеты уже созданы — пересоздаём все страницы с новыми цветами
         if hasattr(self, '_stack'):
-            cur_idx = self._stack.currentIndex()
-            # Удаляем все страницы
-            while self._stack.count():
-                w = self._stack.widget(0)
-                self._stack.removeWidget(w)
-                w.deleteLater()
-            # _nav_buttons не пересоздаются — они в nav_panel который не трогаем
-            # Пересоздаём
-            self._stack.addWidget(self._create_font_page())
-            self._stack.addWidget(self._create_layout_page())
-            self._stack.addWidget(self._create_highlight_page())
-            self._stack.addWidget(self._create_theme_page())
-            self._stack.addWidget(self._create_tts_page())
-            self._stack.addWidget(self._create_screen_page())
-            self._stack.addWidget(self._create_lang_page())
-            self._stack.addWidget(self._create_lib_theme_page())
-            self._stack.addWidget(self._create_dev_page())
-            self._stack.setCurrentIndex(cur_idx)
-            self._loading = True
-            try:
-                self._load_settings()
-            finally:
-                self._loading = False
-            self._restore_font_selection()
+            self._rebuild_pages()
             self._apply_language()
-            self._load_lib_settings()
 
     def _on_lib_theme_radio(self, name):
         from library_window import DARK_THEME, LIGHT_THEME
@@ -1571,12 +1998,11 @@ QFrame {{
         self._emit_lib_theme()
 
     def _emit_lib_theme(self):
-        name = ("dark" if self._lib_rb_dark.isChecked() else
-                "light" if self._lib_rb_light.isChecked() else "custom")
+        name = ("dark" if (hasattr(self, '_lib_cb_dark') and self._lib_cb_dark.isChecked()) else
+                "light" if (hasattr(self, '_lib_cb_light') and self._lib_cb_light.isChecked()) else "custom")
         self.config.set("library_theme_name", name)
         if name == "custom":
             self.config.set("library_theme_custom", dict(self._lib_custom_colors))
         if self._lib_theme_callback:
             self._lib_theme_callback(name, self._lib_custom_colors if name=="custom" else None)
-        # Синхронизируем тему окна настроек с темой библиотеки
         self._sync_theme_to_lib(name)

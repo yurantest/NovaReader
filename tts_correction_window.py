@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QMessageBox, QCheckBox,
+                             QHeaderView, QMessageBox,
                              QWidget, QFrame, QApplication)
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QPalette
@@ -107,17 +107,6 @@ QScrollBar::handle:horizontal {{
     background: {border}; border-radius: 3px;
 }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
-
-/* Чекбокс */
-QCheckBox::indicator {{
-    width: 16px; height: 16px;
-    border-radius: 4px;
-    border: 2px solid {border};
-    background: {bg};
-}}
-QCheckBox::indicator:checked {{
-    background: {accent}; border-color: {accent};
-}}
 
 /* Кнопки */
 QPushButton {{
@@ -259,7 +248,10 @@ class TTSCorrectionWindow(QDialog):
         t.setItem(row, 0, QTableWidgetItem(wrong))
         t.setItem(row, 1, QTableWidgetItem(correct))
 
-        cb = QCheckBox()
+        from settings_window import CheckMark  # тот же виджет, что и в остальном приложении
+        accent = _sys(QPalette.ColorRole.Highlight)
+        border = _sys(QPalette.ColorRole.Mid)
+        cb = CheckMark(accent=accent, border=border)
         cb.setChecked(case_insensitive)
         cb.setToolTip("Без учёта регистра")
         container = QWidget()
@@ -303,7 +295,8 @@ class TTSCorrectionWindow(QDialog):
             if not wrong:
                 continue
             container = table.cellWidget(row, 2)
-            cb = container.findChild(QCheckBox) if container else None
+            from settings_window import CheckMark
+            cb = container.findChild(CheckMark) if container else None
             result.append({'wrong': wrong, 'correct': correct,
                            'case_insensitive': cb.isChecked() if cb else True})
         return result

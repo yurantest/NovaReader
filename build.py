@@ -91,99 +91,6 @@ def error(msg):   print(f"  {red('✗')} {msg}"); sys.exit(1)
 def step(msg):    print(f"\n{bold('▶')} {msg}")
 def run(msg):     print(f"  → {msg}")
 
-def _res_should_exclude(path: Path) -> bool:
-    """Проверяет, нужно ли исключить файл из упаковки."""
-    name = path.name
-    for pattern in RESOURCE_EXCLUDES:
-        if pattern.startswith('*.'):
-            if name.endswith(pattern[1:]):
-                return True
-        elif name == pattern:
-            return True
-    parts = path.parts
-    if any(p in parts for p in ['.git', '.github', '__pycache__']):
-        return True
-    return False
-
-
-    """
-    Кодирует web/ и fonts/ в base64 и генерирует resources_bin.py.
-    Аналог build_resources.py, встроенный в build.py.
-    """
-    import base64 as _b64
-
-    step("Упаковка " + ", ".join(f"{d}/" for d in RESOURCE_DIRS) + " → resources_bin.py")
-
-    fonts_files: dict[str, str] = {}
-    fonts_dir = root / "fonts"
-    if "fonts" in RESOURCE_DIRS and fonts_dir.exists():
-        for f in sorted(fonts_dir.glob("*")):
-            if f.is_file() and not _res_should_exclude(f):
-                fonts_files[f.name] = _b64.b64encode(f.read_bytes()).decode("ascii")
-                run(f"fonts/{f.name}  ({len(fonts_files[f.name])} b64-байт)")
-
-    web_files: dict[str, str] = {}
-    web_dir = root / "web"
-    if "web" in RESOURCE_DIRS and web_dir.exists():
-        for f in sorted(web_dir.rglob("*")):
-            if f.is_file() and not _res_should_exclude(f):
-                rel = str(f.relative_to(web_dir)).replace("\\", "/")
-                web_files[rel] = _b64.b64encode(f.read_bytes()).decode("ascii")
-                run(f"web/{rel}  ({len(web_files[rel])} b64-байт)")
-
-    info(f"Шрифты: {len(fonts_files)}, web-файлы: {len(web_files)}")
-
-    fonts_str = ",\n    ".join(f"'{k}': b'{v}'" for k, v in fonts_files.items())
-    web_str   = ",\n    ".join(f"'{k}': b'{v}'" for k, v in web_files.items())
-
-    code = (
-        '# -*- coding: utf-8 -*-\n'
-        '"""Бинарные ресурсы (web, fonts) — автогенерировано build.py. НЕ РЕДАКТИРОВАТЬ."""\n'
-        'import base64, tempfile, os, hashlib, shutil, atexit, glob\n'
-        'from pathlib import Path\n\n'
-        f'FONTS = {{\n    {fonts_str if fonts_str else "# нет файлов"}\n}}\n\n'
-        f'WEB_FILES = {{\n    {web_str if web_str else "# нет файлов"}\n}}\n\n'
-        '_web_temp_dir: str | None = None\n\n'
-        'def _get_web_temp_dir() -> str:\n'
-        '    global _web_temp_dir\n'
-        '    if _web_temp_dir and Path(_web_temp_dir, "reader.html").exists():\n'
-        '        return _web_temp_dir\n'
-        '    h = hashlib.md5(str(sorted(WEB_FILES.keys())).encode()).hexdigest()[:8]\n'
-        '    d = Path(tempfile.gettempdir()) / f"novareader_{h}"\n'
-        '    if d.exists():\n'
-        '        shutil.rmtree(d)\n'
-        '    d.mkdir(parents=True)\n'
-        '    for name, b64 in WEB_FILES.items():\n'
-        '        p = d / name\n'
-        '        p.parent.mkdir(parents=True, exist_ok=True)\n'
-        '        p.write_bytes(base64.b64decode(b64))\n'
-        '    _web_temp_dir = str(d)\n'
-        '    return _web_temp_dir\n\n'
-        'def get_web_dir() -> Path:\n'
-        '    """Возвращает Path к временной папке web/ со всеми файлами."""\n'
-        '    return Path(_get_web_temp_dir())\n\n'
-        'def get_font_path(font_name: str) -> str:\n'
-        '    """Создаёт временный файл шрифта и возвращает путь к нему."""\n'
-        '    if font_name not in FONTS:\n'
-        '        raise ValueError(f"Unknown font: {font_name}")\n'
-        '    fd, path = tempfile.mkstemp(suffix=".ttf")\n'
-        '    os.write(fd, base64.b64decode(FONTS[font_name]))\n'
-        '    os.close(fd)\n'
-        '    return path\n\n'
-        'def _cleanup():\n'
-        '    tmp = Path(tempfile.gettempdir())\n'
-        '    for d in tmp.glob("novareader_*"):\n'
-        '        try: shutil.rmtree(d)\n'
-        '        except: pass\n'
-        '    for f in glob.glob(str(tmp / "*.ttf")):\n'
-        '        try: os.unlink(f)\n'
-        '        except: pass\n\n'
-        'atexit.register(_cleanup)\n'
-    )
-
-    out_py.write_text(code, encoding="utf-8")
-    size_kb = out_py.stat().st_size / 1024
-    info(f"resources_bin.py готов ({size_kb:.1f} KB) → {out_py.name}")
 
 
 def find_python() -> Path:
@@ -893,7 +800,7 @@ def build_nuitka(venv_python: Path, root: Path, dist_dir: Path, args=None):
         "--include-package=tts",
         "--include-package=tts.clients",
 
-        # web/ и fonts/ встроены в resources_bin.so/pyd
+
 
         # Включаем папки с бинарниками Piper: только нужную платформу
         *( ["--include-data-dir=tts/piper-win=tts/piper-win"]
@@ -916,6 +823,8 @@ def build_nuitka(venv_python: Path, root: Path, dist_dir: Path, args=None):
         "--include-module=audio_player",
         "--include-module=screen_inhibit",
         "--include-module=cloud_download",
+         "--include-module=voice_download_worker",
+         "--include-module=book_search_window",
         # PyQt6.QtDBus нужен для screen_inhibit (кофеин-режим) на Linux
         *(["--include-module=PyQt6.QtDBus"] if sys.platform != "win32" else []),
         # Сетевые пакеты (edge-tts + requests)
@@ -1384,8 +1293,6 @@ def main():
 
     # Компиляция
     if not args.no_compile:
-        # Упаковываем web/ и fonts/ → resources_bin.py → .so/.pyd
-        resources_py = root / "resources_bin.py"
 
         build_nuitka(venv_python, root, dist_dir, args)
 

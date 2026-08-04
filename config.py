@@ -44,6 +44,32 @@ class Config:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
+    @staticmethod
+    def _get_default_download_dir() -> Path:
+        """Возвращает системную папку загрузок пользователя, а не папку
+        библиотеки:
+           Linux : $XDG_DOWNLOAD_DIR (если задан) иначе ~/Downloads
+           Mac/Windows: ~/Downloads
+        """
+        import sys, os
+        if sys.platform not in ('win32', 'darwin'):
+            xdg_dirs_file = Path.home() / '.config' / 'user-dirs.dirs'
+            if xdg_dirs_file.exists():
+                try:
+                    text = xdg_dirs_file.read_text(encoding='utf-8')
+                    for line in text.splitlines():
+                        if line.startswith('XDG_DOWNLOAD_DIR'):
+                            raw = line.split('=', 1)[1].strip().strip('"')
+                            raw = raw.replace('$HOME', str(Path.home()))
+                            p = Path(raw)
+                            p.mkdir(parents=True, exist_ok=True)
+                            return p
+                except Exception:
+                    pass
+        p = Path.home() / 'Downloads'
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
     def __init__(self):
         self.config_dir = self._get_config_dir()
 
@@ -85,6 +111,10 @@ class Config:
         # Путь к библиотеке (может быть изменен пользователем)
         self.library_path = Path(self.get('library_path', str(self.config_dir / 'books')))
         self.library_path.mkdir(parents=True, exist_ok=True)
+
+        # Папка для скачивания книг из онлайн-поиска (может быть изменена пользователем)
+        self.download_path = Path(self.get('download_path', str(Config._get_default_download_dir())))
+        self.download_path.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def _normalize_path(path) -> str:
@@ -150,6 +180,15 @@ class Config:
         if key == 'library_path':
             self.library_path = Path(value)
             self.library_path.mkdir(parents=True, exist_ok=True)
+        elif key == 'download_path':
+            self.download_path = Path(value)
+            self.download_path.mkdir(parents=True, exist_ok=True)
+
+    def get_download_path(self) -> Path:
+        """Возвращает папку для скачивания книг из онлайн-поиска,
+        создавая её при необходимости."""
+        self.download_path.mkdir(parents=True, exist_ok=True)
+        return self.download_path
 
     def get_reader_fonts(self) -> List[str]:
         """Возвращает популярные системные шрифты подходящие для чтения."""

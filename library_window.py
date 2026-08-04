@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QPushButton, QScrollArea, QGridLayout, QLabel,
                              QFileDialog, QMessageBox, QProgressDialog,
                              QFrame, QLineEdit, QMenu, QComboBox, QInputDialog)
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QObject
 from PyQt6.QtGui import QPixmap, QAction, QIcon
 from pathlib import Path
 import sys, shutil, json, re
@@ -33,6 +33,7 @@ _LIB_STRINGS = {
         'restore_url_title':  'Восстановить по ссылке',
         'restore_url_download': 'Загрузка архива…',
         'restore_url_error':  'Не удалось загрузить архив:\n{e}',
+        'online_search':      'Поиск книг онлайн',
         'settings':           'Настройки',
         # Поиск и сортировка
         'search_placeholder': 'Поиск по названию, автору, серии...',
@@ -1496,6 +1497,53 @@ class BookCard(QFrame):
             lay.addWidget(bg)
 
 
+def apply_global_app_style(app) -> None:
+    """
+    Единая точка управления внешним видом всего приложения NovaReader.
+
+    Вызывается один раз при старте (из main.py, сразу после создания
+    QApplication). Красит весь QApplication целиком через setStyleSheet,
+    поэтому ЛЮБОЕ окно/диалог программы — главное окно библиотеки, окно
+    поиска книг (book_search_window.py), стандартные QFileDialog/QMessageBox
+    и т.д. — автоматически наследует один и тот же стиль без необходимости
+    красить себя по отдельности.
+    """
+    from PyQt6.QtWidgets import QStyleFactory
+    fusion = QStyleFactory.create("Fusion")
+    if fusion is not None:
+        app.setStyle(fusion)
+    app.setStyleSheet(f"""
+        QWidget {{ font-family: 'Segoe UI', Arial, sans-serif; background: {BG}; color: {TEXT}; }}
+        QScrollArea {{ border: none; background: {BG}; }}
+        QScrollBar:vertical {{ border: none; background: {SURFACE}; width: 8px; border-radius: 4px; }}
+        QScrollBar::handle:vertical {{ background: {BORDER}; border-radius: 4px; min-height: 20px; }}
+        QScrollBar::handle:vertical:hover {{ background: {ACCENT}; }}
+        QLineEdit {{
+            padding: 6px 10px; border: 1px solid {BORDER}; border-radius: 8px;
+            font-size: 13px; background: {SURFACE}; color: {TEXT};
+        }}
+        QLineEdit:focus {{ border: 1px solid {ACCENT}; }}
+        QPushButton {{
+            padding: 8px 20px; background: {ACCENT}; color: white;
+            border: none; border-radius: 8px; font-weight: bold;
+        }}
+        QPushButton:hover {{ background: #1557b0; }}
+        QPushButton:disabled {{ background: {BORDER}; color: {SUB}; }}
+        QLabel {{ background: transparent; color: {TEXT}; }}
+        QToolButton {{ background: transparent; border: none; }}
+        QToolButton:hover {{ background: {BORDER}; border-radius: 4px; }}
+        QListView, QTreeView {{
+            background: {SURFACE}; color: {TEXT};
+            border: 1px solid {BORDER}; border-radius: 6px;
+            selection-background-color: {ACCENT}; selection-color: white;
+        }}
+        QListView::item, QTreeView::item {{ background: transparent; color: {TEXT}; }}
+        QListView::item:selected, QTreeView::item:selected {{ background: {ACCENT}; color: white; }}
+        QHeaderView::section {{ background: {SURFACE}; color: {TEXT}; border: 1px solid {BORDER}; }}
+        {_combo_style()}
+    """)
+
+
 def _combo_style():
     """Единый стиль для QComboBox — плоский, без системных стрелок."""
     return (
@@ -1531,6 +1579,77 @@ def _combo_style():
     )
 
 
+class StatusFilter(QObject):
+    """Фильтр книг по статусу чтения (встроен в library_window.py)."""
+
+    filter_changed = pyqtSignal()
+
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self._widget = None
+        self._combo = None
+        self._create_widget()
+
+    def _create_widget(self):
+        self._widget = QWidget()
+        self._widget.setStyleSheet("background: transparent;")
+
+        layout = QHBoxLayout(self._widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self._combo = QComboBox()
+        self._combo.addItems([
+            "Все книги",
+            "Только новые",
+            "Только читаемые",
+            "Скрыть новые",
+            "Скрыть читаемые",
+        ])
+        self._combo.setFixedSize(180, 34)
+        self._combo.setStyleSheet(_combo_style())
+        self._combo.currentIndexChanged.connect(self._on_combo_changed)
+        layout.addWidget(self._combo)
+
+    def _on_combo_changed(self, index):
+        self.filter_changed.emit()
+
+    @property
+    def widget(self) -> QWidget:
+        return self._widget
+
+    @property
+    def combo(self) -> QComboBox:
+        return self._combo
+
+    def get_current_index(self) -> int:
+        return self._combo.currentIndex() if self._combo else 0
+
+    def set_current_index(self, index: int):
+        if self._combo:
+            self._combo.blockSignals(True)
+            self._combo.setCurrentIndex(index)
+            self._combo.blockSignals(False)
+
+    def apply(self, books: list) -> list:
+        idx = self.get_current_index()
+        if idx == 0:
+            return books
+        elif idx == 1:
+            return [b for b in books if not b.get('progress') or b.get('progress', 0) == 0]
+        elif idx == 2:
+            return [b for b in books if b.get('progress') and 0 < b.get('progress', 0) < 0.95]
+        elif idx == 3:
+            return [b for b in books if b.get('progress') and b.get('progress', 0) > 0]
+        elif idx == 4:
+            return [b for b in books if not b.get('progress') or b.get('progress', 0) == 0 or b.get('progress', 0) >= 0.95]
+        return books
+
+    def reset(self):
+        self.set_current_index(0)
+
+
 class LibraryWindow(QMainWindow):
     book_selected = pyqtSignal(str)
 
@@ -1542,6 +1661,7 @@ class LibraryWindow(QMainWindow):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.settings_window = None
         init_lib_colors(config)  # применяем сохранённую тему до построения UI
         self.parser = BookParser()
         self.zip_handler = ZipHandler()
@@ -1608,6 +1728,7 @@ class LibraryWindow(QMainWindow):
         self.backup_btn   = _mbtn("backup",       _ls(self.config, 'backup'))
         self.restore_btn     = _mbtn("restore",     _ls(self.config, 'restore'))
         self.restore_url_btn = _mbtn("link",        _ls(self.config, 'restore_url'))
+        self.search_btn      = _mbtn("search",      _ls(self.config, 'online_search'))
         self.settings_btn    = _mbtn("settings",    _ls(self.config, 'settings'))
 
         self.add_btn.clicked.connect(self.add_books)
@@ -1618,6 +1739,7 @@ class LibraryWindow(QMainWindow):
         self.backup_btn.clicked.connect(self.backup_config)
         self.restore_btn.clicked.connect(self.restore_config)
         self.restore_url_btn.clicked.connect(self.restore_from_url)
+        self.search_btn.clicked.connect(self.open_online_search)
         self.settings_btn.clicked.connect(self.open_settings)
 
         self._toolbar_seps = []
@@ -1640,6 +1762,12 @@ class LibraryWindow(QMainWindow):
         lay.addWidget(self.backup_btn)
         lay.addWidget(self.restore_btn)
         lay.addWidget(self.restore_url_btn)
+
+        lay.addWidget(_sep())
+
+        # Поиск книг онлайн — кнопка видна только если включено в настройках разработчика
+        self.search_btn.setVisible(self.config.get('online_search_enabled', False))
+        lay.addWidget(self.search_btn)
 
         lay.addWidget(_sep())
 
@@ -1685,6 +1813,11 @@ class LibraryWindow(QMainWindow):
         self.format_filter.currentTextChanged.connect(self._on_filter_changed)
         lay.addWidget(self.format_filter)
 
+        # Фильтр по статусу чтения
+        self.status_filter = StatusFilter(self.config)
+        self.status_filter.filter_changed.connect(self._on_filter_changed)
+        lay.addWidget(self.status_filter.widget)
+
         sep_r = QFrame()
         sep_r.setFrameShape(QFrame.Shape.VLine)
         sep_r.setFixedHeight(24)
@@ -1698,15 +1831,26 @@ class LibraryWindow(QMainWindow):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         QTimer.singleShot(0, self._reflow)
+        QTimer.singleShot(50, self._reflow)
         if hasattr(self, '_drop_overlay') and self._drop_overlay and self._drop_overlay.isVisible():
             self._drop_overlay.setGeometry(self._central_widget.rect())
 
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == e.Type.WindowStateChange:
+            QTimer.singleShot(0, self._reflow)
+            QTimer.singleShot(50, self._reflow)
+            QTimer.singleShot(150, self._reflow)
+
     def _cols(self):
-        avail = self.books_container.width() - 32
+        avail = self._scroll.viewport().width() - 32
         return max(1, avail // (CARD_W + CARD_S))
 
     def _reflow(self):
         cols = self._cols()
+        if getattr(self, '_last_reflow_cols', None) == cols:
+            return
+        self._last_reflow_cols = cols
         items = [self.books_layout.itemAt(i).widget()
                  for i in range(self.books_layout.count())
                  if self.books_layout.itemAt(i).widget()]
@@ -1723,8 +1867,7 @@ class LibraryWindow(QMainWindow):
         books = self.config.get_books()
         # Сортировка по умолчанию - по последнему чтению
         self._all_books = self._sort_books(books)
-        q = self.search_box.text() if hasattr(self, "search_box") else ""
-        self._display(self._filter(self._all_books, q))
+        self._on_filter_changed()
 
     def _filter(self, books, q):
         q = q.strip().lower()
@@ -1758,7 +1901,8 @@ class LibraryWindow(QMainWindow):
 
     def _on_sort_changed(self):
         """Изменение типа сортировки."""
-        self._display(self._filter(self._all_books, self.search_box.text() if hasattr(self, "search_box") else ""))
+        self._all_books = self._sort_books(self.config.get_books())
+        self._on_filter_changed()
 
     def _on_library_updated(self):
         """Обновление списка книг при изменении библиотеки (real-time)."""
@@ -1776,8 +1920,7 @@ class LibraryWindow(QMainWindow):
 
             books = self.config.get_books()
             self._all_books = self._sort_books(books)
-            self._display(self._filter(self._all_books,
-                          self.search_box.text() if hasattr(self, "search_box") else ""))
+            self._on_filter_changed()
             if scroll_area:
                 scroll_area.verticalScrollBar().setValue(pos)
         finally:
@@ -1812,10 +1955,10 @@ class LibraryWindow(QMainWindow):
             _ls(self.config, 'books_count', n=n))
 
     def _on_search(self, q):
-        self._display(self._filter(self._all_books, q))
+        self._on_filter_changed()
 
-    def _on_filter_changed(self, _text):
-        """Фильтрация по формату книги (по индексу, не тексту)."""
+    def _on_filter_changed(self, _text=None):
+        """Фильтрация по формату книги и по статусу чтения (по индексу, не тексту)."""
         q = self.search_box.text() if hasattr(self, "search_box") else ""
         books = self._filter(self._all_books, q)
         idx = self.format_filter.currentIndex() if hasattr(self, "format_filter") else 0
@@ -1827,6 +1970,8 @@ class LibraryWindow(QMainWindow):
         elif idx in FMT_MAP:
             books = [b for b in books
                      if b.get('format', '').lower() == FMT_MAP[idx]]
+        if hasattr(self, "status_filter"):
+            books = self.status_filter.apply(books)
         self._display(books)
 
     def _on_book_clicked(self, book_info):
@@ -2477,18 +2622,77 @@ class LibraryWindow(QMainWindow):
                 f"padding:0 14px;font-size:13px;}}"
                 f"QLineEdit:focus{{border:1px solid {ACCENT};}}")
 
+    def _on_online_search_toggled(self, enabled):
+        """Callback из настроек: показывает/скрывает кнопку поиска в тулбаре
+        и закрывает открытое окно поиска, если функцию отключили на лету."""
+        if hasattr(self, 'search_btn'):
+            self.search_btn.setVisible(enabled)
+        if not enabled and getattr(self, '_online_search_window', None) is not None:
+            try:
+                self._online_search_window.close()
+            except RuntimeError:
+                pass
+            self._online_search_window = None
+
+    def open_online_search(self):
+        """Открыть окно онлайн-поиска книг."""
+        if not self.config.get('online_search_enabled', True):
+            return
+        from book_search_window import BookSearchWindow
+        
+        # Проверяем, есть ли уже открытое окно поиска
+        if not hasattr(self, '_online_search_window') or self._online_search_window is None:
+            # parent=None (как в окне настроек) — иначе Qt считает окно
+            # transient-дочерним относительно библиотеки: WM/панель задач
+            # не даёт ему отдельную запись в taskbar и не позволяет
+            # переключиться на библиотеку, пока это окно открыто.
+            self._online_search_window = BookSearchWindow(self.config, None)
+            self._online_search_window.setWindowFlags(
+                Qt.WindowType.Window |
+                Qt.WindowType.WindowTitleHint |
+                Qt.WindowType.WindowSystemMenuHint |
+                Qt.WindowType.WindowMinimizeButtonHint |
+                Qt.WindowType.WindowCloseButtonHint)
+
+        self._online_search_window.show()
+        self._online_search_window.raise_()
+        self._online_search_window.activateWindow()
+
     def open_settings(self):
         """Открыть окно настроек как независимое окно (не дочернее)."""
         from settings_window import SettingsWindow
+
+        # Синглтон: если окно настроек уже существует (даже скрытое/свёрнутое) —
+        # просто показываем его снова, а не создаём новое. Это важно, потому
+        # что внутри окна настроек живёт PiperVoicesWidget с активными
+        # QProcess-загрузками голосов; если не держать постоянную Python-
+        # ссылку на окно, сборщик мусора может уничтожить его прямо во время
+        # загрузки (как только пропадает последняя ссылка на локальную
+        # переменную dlg), а фоновый QProcess продолжит работать и присылать
+        # сигналы уже несуществующему объекту — отсюда
+        # "RuntimeError: wrapped C/C++ object ... has been deleted".
+        if self.settings_window is not None:
+            try:
+                self.settings_window.show()
+                self.settings_window.raise_()
+                self.settings_window.activateWindow()
+                return
+            except RuntimeError:
+                # Старое окно уже было уничтожено (например, пользователь
+                # закрыл его так, что Qt всё же удалил C++ объект) — создадим новое.
+                self.settings_window = None
+
         # parent=None + Qt.WindowType.Window = своя кнопка в taskbar, независимое сворачивание
         dlg = SettingsWindow(self.config, parent=None,
-                             lib_theme_callback=self.apply_lib_theme)
+                             lib_theme_callback=self.apply_lib_theme,
+                             online_search_changed_callback=self._on_online_search_toggled)
         dlg.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowTitleHint |
             Qt.WindowType.WindowSystemMenuHint |
             Qt.WindowType.WindowMinimizeButtonHint |
             Qt.WindowType.WindowCloseButtonHint)
+        self.settings_window = dlg   # держим постоянную ссылку — не даём GC уничтожить окно
         dlg.show()   # show() вместо exec() — не блокирует, не является дочерним
 
     # ── резервное копирование ──────────────────────────────────
@@ -2500,7 +2704,9 @@ class LibraryWindow(QMainWindow):
         from PyQt6.QtCore import QThread
 
         from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
-                                      QCheckBox, QPushButton, QLabel)
+                                      QPushButton, QLabel)
+        # Тот же переключатель, что и в окне настроек — не плодим второй похожий виджет
+        from settings_window import QToggleSwitch
 
         def _fmt_size(b):
             for unit in ('Б', 'КБ', 'МБ', 'ГБ'):
@@ -2519,10 +2725,6 @@ class LibraryWindow(QMainWindow):
         dlg_info.setStyleSheet(
             f'QDialog{{background:{BG};color:{TEXT};}}'
             f'QLabel{{color:{TEXT};}}'
-            f'QCheckBox{{color:{TEXT};font-size:13px;spacing:8px;}}'
-            f'QCheckBox::indicator{{width:17px;height:17px;border-radius:4px;'
-            f'border:1px solid {BORDER};background:{SURFACE};}}'
-            f'QCheckBox::indicator:checked{{background:{ACCENT};border-color:{ACCENT};}}'
             f'QPushButton{{background:{SURFACE};color:{TEXT};border:1px solid {BORDER};'
             f'border-radius:6px;padding:7px 18px;font-size:13px;min-width:0;}}'
             f'QPushButton:hover{{border-color:{ACCENT};background:rgba(255,255,255,.08);}}'
@@ -2545,13 +2747,26 @@ class LibraryWindow(QMainWindow):
 
         vlay.addSpacing(4)
 
-        # Опциональные папки
-        chk_voices = QCheckBox('Голоса Piper (~/.config/NovaReader/voices/)')
-        chk_fonts  = QCheckBox('Пользовательские шрифты (~/.config/NovaReader/fonts/)')
+        # Опциональные папки — переключатели вместо галочек
+        def _toggle_row(toggle, text):
+            row = QWidget()
+            row.setStyleSheet('background:transparent;')
+            rh = QHBoxLayout(row)
+            rh.setContentsMargins(0, 0, 0, 0)
+            rh.setSpacing(10)
+            rh.addWidget(toggle)
+            lbl = QLabel(text)
+            lbl.setStyleSheet(f'color:{TEXT}; font-size:13px; background:transparent;')
+            rh.addWidget(lbl)
+            rh.addStretch()
+            return row
+
+        chk_voices = QToggleSwitch(accent=ACCENT, track_off=BORDER)
+        chk_fonts  = QToggleSwitch(accent=ACCENT, track_off=BORDER)
         chk_voices.setChecked(self.config.get('backup_include_voices', False))
         chk_fonts.setChecked(self.config.get('backup_include_fonts', False))
-        vlay.addWidget(chk_voices)
-        vlay.addWidget(chk_fonts)
+        vlay.addWidget(_toggle_row(chk_voices, 'Голоса Piper (~/.config/NovaReader/voices/)'))
+        vlay.addWidget(_toggle_row(chk_fonts,  'Пользовательские шрифты (~/.config/NovaReader/fonts/)'))
 
         vlay.addSpacing(6)
 

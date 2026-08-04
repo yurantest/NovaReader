@@ -5,6 +5,37 @@
 # ╚══════════════════════════════════════════════════════════════════╝
 import sys
 import os
+import json
+from pathlib import Path
+
+
+def _get_config_dir() -> Path:
+    """Дублирует Config._get_config_dir(). Используется только здесь,
+    чтобы прочитать settings.json ДО импорта PyQt6/Config — полноценный
+    Config создавать в этот момент нельзя (тянет PyQt через другие модули)."""
+    if sys.platform == 'win32':
+        base = Path(os.environ.get('APPDATA', Path.home()))
+    elif sys.platform == 'darwin':
+        base = Path.home() / 'Library' / 'Application Support'
+    else:
+        xdg = os.environ.get('XDG_CONFIG_HOME', '')
+        base = Path(xdg) if xdg else Path.home() / '.config'
+    return base / 'NovaReader'
+
+
+def _read_setting(key: str, default):
+    """Лёгкое чтение одного ключа из settings.json до создания QApplication.
+    Нужно только для выбора графического backend (Vulkan/OpenGL/DirectX11),
+    который обязан быть выставлен через os.environ ДО импорта PyQt6."""
+    try:
+        settings_file = _get_config_dir() / 'settings.json'
+        if settings_file.exists():
+            data = json.loads(settings_file.read_text(encoding='utf-8'))
+            return data.get(key, default)
+    except Exception:
+        pass
+    return default
+
 
 # Флаги памяти Chromium — ОБЯЗАТЕЛЬНО до любого import PyQt6
 # ВАЖНО: флаги должны быть в одной строке, разделенные пробелами
@@ -58,29 +89,151 @@ _MEMORY_FLAGS = (
     '--allow-file-access-from-files '
 )
 
-if sys.platform == 'win32':
-    os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
-        f'--use-gl=angle --use-angle=d3d11 '
-        f'--disable-gpu-sandbox '
-        f'--max-frame-rate=60 '
-        f'--disable-accelerated-2d-canvas '
-        f'--disable-accelerated-video-decode '
-        f'{_MEMORY_FLAGS}'
+
+def _linux_has_vulkan() -> bool:
+    """Грубая проверка доступности Vulkan-драйвера в системе.
+    Используется ДО импорта PyQt6, поэтому только ctypes/os, без Qt."""
+    try:
+        import ctypes
+        import ctypes.util
+        lib_name = ctypes.util.find_library('vulkan') or 'libvulkan.so.1'
+        ctypes.CDLL(lib_name)
+        return True
+    except Exception:
+        return False
+
+
+def _windows_has_d3d11() -> bool:
+    """Проверяет реальную поддержку D3D11 на уровне GPU/драйвера через
+    D3D11CreateDevice. Исправлено: явный restype для HRESULT, проверка S_FALSE."""
+    try:
+        import ctypes
+        d3d11 = ctypes.WinDLL('d3d11.dll')
         
-    )
-    os.environ['ANGLE_FEATURE_OVERRIDES_ENABLED'] = 'force_d3d11'
+        # КРИТИЧНО: явно указываем что функция возвращает HRESULT (32-битное знаковое)
+        d3d11.D3D11CreateDevice.restype = ctypes.HRESULT
+        
+        feature_levels = (ctypes.c_uint * 4)(0xc100, 0xb000, 0xa100, 0xa000)
+        hr = d3d11.D3D11CreateDevice(
+            None,            # pAdapter
+            1,               # D3D_DRIVER_TYPE_HARDWARE
+            None,            # Software
+            0,               # Flags
+            feature_levels, 4,
+            7,               # D3D11_SDK_VERSION
+            None, None, None
+        )
+        
+        # S_OK = 0, S_FALSE = 1 — оба считаются успехом
+        # DXGI_ERROR_UNSUPPORTED = 0x887A0004 — не поддерживается
+        if hr == 0 or hr == 1:
+            print(f'[GPU] D3D11 поддерживается (HRESULT={hr})')
+            return True
+        else:
+            print(f'[GPU] D3D11 не поддерживается (HRESULT=0x{hr & 0xFFFFFFFF:08X})')
+            return False
+    except Exception as e:
+        print(f'[GPU] Ошибка проверки D3D11: {e}')
+        return False
+
+
+if sys.platform == 'win32':
+    _gfx_backend = _read_setting('windows_graphics_backend', 'd3d11')  # 'd3d11' | 'opengl' | 'vulkan'
+    _gfx_auto_detect = _read_setting('gfx_auto_detect', True)
+
+    # Если выбран D3D11 (в том числе по умолчанию), но видеокарта/драйвер
+    # реально его не поддерживают — автоматически откатываемся на OpenGL.
+    # Настройку в settings.json не трогаем: если позже сменят видеокарту
+    # или драйвер, программа снова попробует D3D11 при следующем запуске.
+    # Автоопределение можно отключить в настройках (для теста/отладки) —
+    # тогда ручной выбор пользователя всегда в приоритете, без проверок.
+    if _gfx_auto_detect and _gfx_backend == 'd3d11' and not _windows_has_d3d11():
+        print('[GPU] D3D11 не поддерживается видеокартой/драйвером — переключаюсь на OpenGL.')
+        _gfx_backend = 'opengl'
+
+    if _gfx_backend == 'opengl':
+        # ==================== OpenGL (Windows, через ANGLE) ====================
+        # --disable-gpu-compositing обязателен именно здесь: без него на
+        # Windows контент QtWebEngine не отображается вовсе (пустой экран).
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
+            f'--use-gl=angle --use-angle=gl '
+            f'--disable-gpu-compositing '
+            f'--disable-gpu-sandbox '
+            f'--max-frame-rate=60 '
+            f'--disable-accelerated-2d-canvas '
+            f'--disable-accelerated-video-decode '
+            f'{_MEMORY_FLAGS}'
+        )
+        os.environ.pop('ANGLE_FEATURE_OVERRIDES_ENABLED', None)
+        os.environ['QSG_RHI_BACKEND'] = 'opengl'   # ← Qt Quick интерфейс на том же backend'е, что и WebEngine
+    elif _gfx_backend == 'vulkan':
+        # ==================== Vulkan (Windows, через ANGLE) ====================
+        # --disable-gpu-compositing нужен и здесь: без него контент
+        # QtWebEngine на Vulkan на Windows тоже не отображается.
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
+            f'--use-gl=angle --use-angle=vulkan '
+            f'--disable-gpu-compositing '
+            f'--disable-gpu-sandbox '
+            f'--max-frame-rate=60 '
+            f'--disable-accelerated-2d-canvas '
+            f'--disable-accelerated-video-decode '
+            f'{_MEMORY_FLAGS}'
+        )
+        os.environ.pop('ANGLE_FEATURE_OVERRIDES_ENABLED', None)
+        os.environ['QSG_RHI_BACKEND'] = 'vulkan'   # ← Qt Quick интерфейс на том же backend'е, что и WebEngine
+    else:
+        # ==================== DirectX 11 (по умолчанию на Windows) ====================
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
+            f'--use-gl=angle --use-angle=d3d11 '
+            f'--disable-gpu-sandbox '
+            f'--max-frame-rate=60 '
+            f'--disable-accelerated-2d-canvas '
+            f'--disable-accelerated-video-decode '
+            f'{_MEMORY_FLAGS}'
+        )
+        os.environ['ANGLE_FEATURE_OVERRIDES_ENABLED'] = 'force_d3d11'
+        os.environ['QSG_RHI_BACKEND'] = 'd3d11'    # ← Qt Quick интерфейс на том же backend'е, что и WebEngine
+
     os.environ['QTWEBENGINE_DISABLE_SANDBOX'] = '1'
 
 elif sys.platform == 'linux':
-    # ==================== OpenGL ====================
-    os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
-        f'--use-gl=angle '      # ← WebEngine через OpenGL
-        f'--disable-gpu-sandbox '
-        f'--max-frame-rate=60 '
-        f'{_MEMORY_FLAGS}'
-    )
+    _gfx_backend = _read_setting('linux_graphics_backend', 'vulkan')  # 'vulkan' | 'opengl'
+    _gfx_auto_detect = _read_setting('gfx_auto_detect', True)
+
+    # Если выбран Vulkan (в том числе по умолчанию), но в системе нет
+    # рабочего Vulkan-драйвера — автоматически откатываемся на OpenGL.
+    # Настройку в settings.json не трогаем — при появлении драйвера
+    # программа снова попробует Vulkan при следующем запуске.
+    # Автоопределение можно отключить в настройках (для теста/отладки) —
+    # тогда ручной выбор пользователя всегда в приоритете, без проверок.
+    if _gfx_auto_detect and _gfx_backend == 'vulkan' and not _linux_has_vulkan():
+        print('[GPU] Vulkan не поддерживается видеокартой/драйвером — переключаюсь на OpenGL.')
+        _gfx_backend = 'opengl'
+
+    if _gfx_backend == 'opengl':
+        # ==================== OpenGL ====================
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
+            f'--use-gl=angle --use-angle=gl '   # ← WebEngine через ANGLE/OpenGL
+            f'--disable-gpu-sandbox '
+            f'--max-frame-rate=60 '
+            f'{_MEMORY_FLAGS}'
+            # Примечание: --disable-gpu-compositing здесь НЕ добавляется —
+            # он нужен только для устранения проблем композитинга Vulkan+Wayland,
+            # на чистом OpenGL композитинг работает штатно.
+        )
+        os.environ['QSG_RHI_BACKEND'] = 'opengl'   # ← Qt Quick интерфейс на том же backend'е, что и WebEngine
+    else:
+        # ==================== Vulkan (по умолчанию на Linux) ====================
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
+            f'--use-gl=angle --use-angle=vulkan '   # ← WebEngine через Vulkan
+            f'--disable-gpu-compositing '            # ← чинит артефакты композитинга на Wayland; сам рендеринг остаётся на GPU через Vulkan
+            f'--disable-gpu-sandbox '
+            f'--max-frame-rate=60 '
+            f'{_MEMORY_FLAGS}'
+        )
+        os.environ['QSG_RHI_BACKEND'] = 'vulkan'   # ← Qt Quick интерфейс на том же backend'е, что и WebEngine
+
     os.environ['QTWEBENGINE_DISABLE_SANDBOX'] = '1'
-    os.environ['QSG_RHI_BACKEND'] = 'opengl'       # ← Qt Quick интерфейс на OpenGL
 
 # Дополнительные оптимизации Qt WebEngine
 os.environ['QTWEBENGINE_LOCALES_PATH'] = ''
@@ -125,7 +278,6 @@ def _load_flags_from_file():
 
 
 # Загружаем флаги из файла (если есть)
-from pathlib import Path
 _load_flags_from_file()
 
 
@@ -712,6 +864,15 @@ class EbookReader:
 
         self.config = Config()
         _setup_logging(self.config)
+        # Сохраняем backend, который реально включился после автоопределения
+        # (main.py мог откатить Vulkan/D3D11 на OpenGL, если GPU не поддерживает
+        # выбранный). Отдельный технический ключ — настройку-предпочтение
+        # пользователя не трогаем, чтобы при обновлении драйвера/видеокарты
+        # программа снова попробовала исходный выбор.
+        try:
+            self.config.set('_active_graphics_backend', _gfx_backend)
+        except Exception:
+            pass
         _set_app_icon(self.app)
         # Прогреваем кэш шрифтов сразу — чтобы getSettings() не тормозил при открытии книги
         try:
@@ -720,6 +881,7 @@ class EbookReader:
             pass
 
         self.library_window = None
+        self.settings_window = None
         self.reader_windows = []
         self._reader_procs: list[tuple[str, subprocess.Popen]] = []
         self._webengine_ready = False
@@ -879,8 +1041,16 @@ class EbookReader:
             self.config._positions = self.config._load_positions()
             self.config.mark_as_read(book_path)
 
+            # Пересборку карточек библиотеки откладываем на "после запуска":
+            # это тяжёлая операция (deleteLater + пересоздание всех BookCard),
+            # и на горячем пути открытия книги она не нужна — карточка "прочитано"
+            # может обновиться на секунду позже без разницы для пользователя.
+            # Раньше вызывалась синхронно ДО запуска процесса читалки, из-за чего
+            # клик по обложке мог "теряться"/задерживаться, если очередь событий
+            # главного потока уже была занята (например, обработкой вывода
+            # активной фоновой загрузки голоса TTS).
             if self.library_window:
-                self.library_window._on_library_updated()
+                QTimer.singleShot(0, self.library_window._on_library_updated)
 
             cmd = _build_reader_cmd(book_path)
             proc = subprocess.Popen(cmd, env=os.environ.copy())
@@ -934,7 +1104,35 @@ class EbookReader:
         return self.app.exec()
 
 
+def _build_piper_worker_cmd(voice_name: str, onnx_url: str, json_url: str, voices_dir: str) -> list:
+    """Возвращает команду для запуска voice_download_worker в subprocess —
+    той же логикой, что и _build_reader_cmd для --reader: в собранном виде
+    ищем сам exe рядом (NovaReader/NovaReader.exe/main/main.exe) и запускаем
+    его же с флагом --piper-worker; в dev-режиме — обычный python3 + .py."""
+    exe_dir = Path(sys.executable).parent
+    for app_name in ('NovaReader', 'NovaReader.exe', 'main', 'main.exe'):
+        app_bin = exe_dir / app_name
+        if app_bin.exists():
+            return [str(app_bin), '--piper-worker', voice_name, onnx_url, json_url, voices_dir]
+    worker_script = Path(__file__).resolve().parent / 'voice_download_worker.py'
+    return [sys.executable, str(worker_script), voice_name, onnx_url, json_url, voices_dir]
+
+
 def main():
+    # Режим "воркера" для скачивания голосов Piper — та же идея, что и
+    # --reader чуть ниже: в собранном виде нет системного Python, чтобы
+    # исполнить voice_download_worker.py как отдельный скрипт, поэтому
+    # piper_voices_widget.py запускает СЕБЯ ЖЕ (через _build_piper_worker_cmd)
+    # с этим флагом, а мы тут просто передаём управление и выходим —
+    # никакого QApplication/GUI для этого не создаём.
+    if '--piper-worker' in sys.argv:
+        idx = sys.argv.index('--piper-worker')
+        worker_args = sys.argv[idx + 1:]
+        sys.argv = [sys.argv[0]] + worker_args
+        import voice_download_worker
+        voice_download_worker.main()
+        return
+
     if '--reader' in sys.argv:
         idx = sys.argv.index('--reader')
         if idx + 1 < len(sys.argv):
