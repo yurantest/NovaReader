@@ -1,0 +1,78 @@
+# ══════════════════════════════════════════════════════════════════════════
+# Flatpak-манифест NovaReader.
+#
+# ВАЖНО: этот манифест НЕ пересобирает приложение из исходников — как и
+# package-build.sh (AppImage), он берёт уже готовую Nuitka-standalone сборку
+# из dist/NovaReader и просто кладёт её файлы в песочницу Flatpak. Сборка
+# PyQt6-WebEngine из исходников силами flatpak-builder — отдельная, гораздо
+# более сложная и хрупкая задача (своя цепочка зависимостей Chromium),
+# и в этом нет смысла: dist/NovaReader уже полностью самодостаточна
+# (bundled Python, Qt, все .so — тот же принцип, что и у AppImage).
+#
+# ИСПОЛЬЗОВАНИЕ:
+#   python3 build.py --target linux --clean       # сначала обычная сборка
+#   python3 build.py --target linux --flatpak     # затем упаковка (без пересборки)
+#
+# Или вручную:
+#   flatpak-builder --force-clean --repo=flatpak-repo flatpak-build \
+#       flatpak/com.novareader.NovaReader.yml
+#
+# Требует установленных: flatpak-builder,
+#   flatpak install flathub org.freedesktop.Platform//23.08 \
+#                            org.freedesktop.Sdk//23.08
+# ══════════════════════════════════════════════════════════════════════════
+
+app-id: com.novareader.NovaReader
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+command: NovaReader
+
+finish-args:
+  # Графика — X11 и Wayland (Wayland с фолбэком на X11 через XWayland)
+  - --socket=x11
+  - --socket=wayland
+  - --socket=fallback-x11
+  # GPU-ускорение — важно для QtWebEngine/Chromium-рендеринга
+  - --device=dri
+  # Chromium (QtWebEngine) требует IPC-шаринг для внутренних процессов
+  - --share=ipc
+  # Аудио — озвучка TTS (Piper/Edge)
+  - --socket=pulseaudio
+  # Сеть — поиск книг онлайн, Edge TTS, скачивание fb2c, восстановление
+  # резервной копии по ссылке
+  - --share=network
+  # Библиотека книг может лежать в любом месте домашней папки (функция
+  # "Сканировать папку" сканирует произвольные пути) — более узкие
+  # xdg-documents/xdg-download сюда не подойдут по функциональности
+  - --filesystem=home
+  # Если после установки видна чёрная страница QtWebEngine или сбоит GPU —
+  # частая для Flatpak+Chromium проблема; обычно помогает передать
+  # --disable-gpu-sandbox в QTWEBENGINE_CHROMIUM_FLAGS (уже выставляются
+  # самим приложением в main.py) — эта строка оставлена как памятка,
+  # действие не требуется, если всё работает из коробки.
+
+modules:
+  - name: novareader
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/bin
+      - cp -r app-files/* /app/bin/
+      - chmod +x /app/bin/NovaReader || true
+      - chmod +x /app/bin/python3 || true
+      - install -Dm644 com.novareader.NovaReader.desktop
+        /app/share/applications/com.novareader.NovaReader.desktop
+      - install -Dm644 com.novareader.NovaReader.png
+        /app/share/icons/hicolor/256x256/apps/com.novareader.NovaReader.png
+    sources:
+      # Готовая Nuitka-standalone сборка — создаётся отдельным шагом
+      # (python3 build.py --target linux --clean), этот манифест её не
+      # пересобирает, только упаковывает.
+      - type: dir
+        path: ../dist/NovaReader
+        dest: app-files
+      - type: file
+        path: com.novareader.NovaReader.desktop
+      - type: file
+        path: ../icon.png
+        dest-filename: com.novareader.NovaReader.png

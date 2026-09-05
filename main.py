@@ -6,13 +6,35 @@
 import sys
 import os
 import json
+import subprocess
 from pathlib import Path
+
+os.environ.setdefault('MALLOC_ARENA_MAX', '2')
+
+# ── SSL-сертификаты: гарантируем рабочий CA bundle для requests ────────
+# В standalone-сборке Nuitka пакет certifi не всегда утягивает cacert.pem
+# как package-data — это не .py-модуль, а просто файл данных, и
+# --include-package=requests сам по себе не гарантирует его копирование.
+# На Linux это часто маскируется системным fallback (/etc/ssl/certs),
+# на Windows такого fallback нет вообще — там requests/urllib3 просто
+# падает с CERTIFICATE_VERIFY_FAILED на любой HTTPS-запрос (загрузка
+# голосов Piper, облачные книги), и это может выглядеть как "загрузка
+# вообще не работает" без явной причины на экране.
+# Устанавливаем переменные окружения ДО запуска дочерних процессов
+# (voice_download_worker и т.п.) — они наследуют окружение через QProcess.
+try:
+    import certifi
+    _cacert_path = certifi.where()
+    if Path(_cacert_path).exists():
+        os.environ.setdefault('SSL_CERT_FILE', _cacert_path)
+        os.environ.setdefault('REQUESTS_CA_BUNDLE', _cacert_path)
+    else:
+        print(f'[App] certifi.where() указывает на несуществующий файл: {_cacert_path}')
+except Exception as _certifi_err:
+    print(f'[App] Не удалось настроить certifi CA bundle: {_certifi_err}')
 
 
 def _get_config_dir() -> Path:
-    """Дублирует Config._get_config_dir(). Используется только здесь,
-    чтобы прочитать settings.json ДО импорта PyQt6/Config — полноценный
-    Config создавать в этот момент нельзя (тянет PyQt через другие модули)."""
     if sys.platform == 'win32':
         base = Path(os.environ.get('APPDATA', Path.home()))
     elif sys.platform == 'darwin':
@@ -24,9 +46,6 @@ def _get_config_dir() -> Path:
 
 
 def _read_setting(key: str, default):
-    """Лёгкое чтение одного ключа из settings.json до создания QApplication.
-    Нужно только для выбора графического backend (Vulkan/OpenGL/DirectX11),
-    который обязан быть выставлен через os.environ ДО импорта PyQt6."""
     try:
         settings_file = _get_config_dir() / 'settings.json'
         if settings_file.exists():
@@ -37,13 +56,103 @@ def _read_setting(key: str, default):
     return default
 
 
-# Флаги памяти Chromium — ОБЯЗАТЕЛЬНО до любого import PyQt6
-# ВАЖНО: флаги должны быть в одной строке, разделенные пробелами
-_JS_FLAGS = '--max-old-space-size=256 --expose-gc'
+_APP_NAME = "NovaReader"
+
+
+def _rebrand_webengine_process():
+    """
+    Копирует бинарник QtWebEngineProcess под именем программы и указывает
+    Chromium использовать эту копию через QTWEBENGINE_PROCESS_PATH.
+
+    Зачем: без этого все дочерние процессы Chromium (по одному на
+    рендерер/GPU) видны в диспетчере задач/системном мониторе под именем
+    "QtWebEngineProcess" - отдельно от главного процесса программы, и
+    внешне непонятно, что они вообще относятся к этому приложению.
+    Переименованная копия решает именно это: имя видимого процесса
+    (Image Name в Task Manager -> Подробности, comm/argv0 в ps/top/htop/
+    GNOME System Monitor) совпадает с именем программы, как это сделано,
+    например, у Chrome/Electron-приложений с их "Helper"-процессами.
+
+    Работает и для запуска из исходников (venv/pip), и для frozen-сборки -
+    раньше подмена пути делалась только для frozen. Копия кладётся в
+    кэш-папку и переиспользуется между запусками (копируем заново только
+    если оригинал в установке Qt изменился).
+
+    Важно для Windows: колонка "Имя образа" в диспетчере задач
+    (вкладка "Подробности") покажет "NovaReader.exe" корректно сразу.
+    А вот группировка по значку/описанию во вкладке "Процессы" зависит
+    ещё и от VERSIONINFO-ресурса внутри exe (Компания/Продукт/Описание
+    файла) - при простом копировании файла этот ресурс остаётся от Qt
+    ("Qt WebEngine Process"), и для полной подмены там его нужно
+    дополнительно патчить инструментом вроде rcedit на этапе сборки
+    (см. build.py) - это отдельный шаг, сюда не включён.
+    """
+    exe_suffix = '.exe' if sys.platform == 'win32' else ''
+    target_name = f'{_APP_NAME}{exe_suffix}'
+
+    candidates = []
+    if getattr(sys, 'frozen', False):
+        app_dir = Path(sys.executable).parent
+        for base_dir in [app_dir, app_dir / '_internal', app_dir / 'PyQt6', app_dir / 'PyQt6' / 'Qt6']:
+            candidates.append(base_dir / 'libexec' / f'QtWebEngineProcess{exe_suffix}')
+    else:
+        # Запуск из исходников: ищем оригинал внутри установленного пакета
+        # PyQt6-WebEngine (стандартный layout pip-колеса).
+        try:
+            import PyQt6
+            pyqt_dir = Path(PyQt6.__file__).parent
+            candidates.append(pyqt_dir / 'Qt6' / 'libexec' / f'QtWebEngineProcess{exe_suffix}')
+            candidates.append(pyqt_dir / 'Qt6' / 'bin' / f'QtWebEngineProcess{exe_suffix}')
+        except Exception:
+            pass
+
+    source = next((c for c in candidates if c.exists()), None)
+    if source is None:
+        return  # оригинал не нашли - остаётся штатное поведение Qt
+
+    if sys.platform == 'win32':
+        cache_base = Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData' / 'Local'))
+    else:
+        cache_base = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache'))
+    dest = cache_base / _APP_NAME / 'webengine-process' / target_name
+
+    try:
+        need_copy = (
+            not dest.exists()
+            or dest.stat().st_size != source.stat().st_size
+            or dest.stat().st_mtime < source.stat().st_mtime
+        )
+        if need_copy:
+            import shutil
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
+            if sys.platform != 'win32':
+                dest.chmod(0o755)
+        os.environ['QTWEBENGINE_PROCESS_PATH'] = str(dest)
+        if sys.platform == 'win32':
+            import gpu_preference
+            _gpu_pref = _read_setting('windows_gpu_preference', 'auto')
+            if _gpu_pref in ('power_saving', 'high_performance'):
+                # Явная настройка пользователя (Настройки -> GPU) -
+                # применяем к обоим exe одинаково.
+                gpu_preference.set_gpu_preference(_gpu_pref, [sys.executable, dest])
+            else:
+                # Настройка не задана - подхватываем то, что пользователь
+                # мог включить вручную через NVIDIA/AMD панель для
+                # главного exe, и синхронизируем на хелпер.
+                gpu_preference.sync_gpu_preference(sys.executable, dest)
+    except OSError as e:
+        print(f'[App] Не удалось подготовить переименованный QtWebEngineProcess: {e}')
+
+
+
+# CPU-оптимизация (2026-09): раньше --max-old-space-size=256 держал V8-кучу
+# слишком тесной для перевёрстки книги -> частые GC-паузы жрали CPU при
+# листании. 384 МБ — разумный компромисс: чуть больше памяти, заметно
+# меньше сборок мусора.
+_JS_FLAGS = '--max-old-space-size=384 --expose-gc'
 _MEMORY_FLAGS = (
     '--disable-background-networking '
-    '--disable-background-timer-throttling '
-    '--disable-backgrounding-occluded-windows '
     '--disable-breakpad '
     '--disable-client-side-phishing-detection '
     '--disable-component-update '
@@ -60,39 +169,110 @@ _MEMORY_FLAGS = (
     '--disable-popup-blocking '
     '--disable-print-preview '
     '--disable-prompt-on-repost '
-    '--disable-renderer-backgrounding '
     '--disable-setuid-sandbox '
     '--disable-site-isolation-trials '
     '--disable-speech-api '
     '--disable-sync '
     '--disable-webgl '
-    '--disk-cache-size=0 '
+    '--disk-cache-size=52428800 '
     '--media-cache-size=0 '
-    # ── Кэши между сессиями: главная причина 1.4 ГБ при повторном запуске ──
-    # GPU shader cache (~200-500 МБ): компилированные шейдеры накапливаются
-    # на диске и жадно загружаются в память при каждом следующем запуске.
-    '--disable-gpu-shader-disk-cache '
-    # Code Cache: скомпилированный JS/WASM (reader.html + foliate-js)
     '--aggressive-cache-discard '
-    '--disable-application-cache '
-    '--disable-offline-load-stale-cache '
     f'--js-flags="{_JS_FLAGS}" '
-    '--max_old_space_size=256 '
     '--renderer-process-limit=1 '
-    '--single-process '  # Важно: уменьшает потребление памяти
-    # ── Прямой доступ к файлам (file:// → fetch другого file://) ──────────
-    # Позволяет reader.html загружать книги напрямую с диска через fetch(),
-    # минуя base64-кодирование через Python-мост.
-    # БЕЗОПАСНО: WebEngine используется как локальный рендерер,
-    # доступ в интернет полностью отключён всеми флагами выше.
     '--disable-web-security '
     '--allow-file-access-from-files '
 )
+# ЯВНО убраны (были причиной высокой нагрузки на CPU, см. память проекта):
+#   --single-process                     -> рендерер/GPU/браузер делят один
+#                                            поток, конкурируя с Qt/Python;
+#                                            без него нагрузка размазывается
+#                                            по ядрам и падает на слабом CPU
+#                                            (цена: +1 процесс, ~30-60 МБ).
+#   --disable-background-timer-throttling
+#   --disable-backgrounding-occluded-windows
+#   --disable-renderer-backgrounding     -> запрещали Chromium снижать частоту
+#                                            таймеров/рендера в свёрнутом/
+#                                            неактивном окне - читалка грузила
+#                                            CPU даже в фоне.
+#   --disable-gpu-shader-disk-cache
+#   --disable-application-cache
+#   --disable-offline-load-stale-cache   -> вместе с NoCache гасили кэш
+#                                            скомпилированного V8-байткода
+#                                            движка ibc/*.js -> перекомпиляция
+#                                            JS при каждом открытии книги.
+#   --max_old_space_size=256 (без дефиса) -> несуществующий для Chromium флаг,
+#                                            мёртвый код, ни на что не влиял.
+
+
+# ── Гибридная графика (Linux) ───────────────────────────────────────
+def _linux_detect_gpu_vendors() -> set:
+    vendors = set()
+    vendor_ids = {'0x8086': 'intel', '0x10de': 'nvidia', '0x1002': 'amd', '0x1022': 'amd'}
+    try:
+        drm_dir = Path('/sys/class/drm')
+        if not drm_dir.exists():
+            return vendors
+        for card in sorted(drm_dir.glob('card[0-9]*')):
+            if '-' in card.name:
+                continue
+            vendor_file = card / 'device' / 'vendor'
+            try:
+                vid = vendor_file.read_text().strip().lower()
+                if vid in vendor_ids:
+                    vendors.add(vendor_ids[vid])
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return vendors
+
+
+def _linux_apply_hybrid_gpu_env(vendors: set):
+    if 'nvidia' in vendors and 'intel' in vendors:
+        os.environ.setdefault('__NV_PRIME_RENDER_OFFLOAD', '1')
+        os.environ.setdefault('__GLX_VENDOR_LIBRARY_NAME', 'nvidia')
+        os.environ.setdefault('__VK_LAYER_NV_optimus', 'NVIDIA_only')
+        print('[GPU] Гибридная графика Intel+Nvidia — включён PRIME render offload.')
+    elif 'amd' in vendors and 'intel' in vendors:
+        os.environ.setdefault('DRI_PRIME', '1')
+        print('[GPU] Гибридная графика Intel+AMD — включён DRI_PRIME offload.')
+
+
+def _linux_primary_gpu_pci_id() -> str:
+    try:
+        drm_dir = Path('/sys/class/drm')
+        if not drm_dir.exists():
+            return ''
+        for card in sorted(drm_dir.glob('card[0-9]*')):
+            if '-' in card.name:
+                continue
+            dev_dir = card / 'device'
+            try:
+                vendor = dev_dir.joinpath('vendor').read_text().strip().lower()
+                device = dev_dir.joinpath('device').read_text().strip().lower()
+                if vendor.startswith('0x'):
+                    vendor = vendor[2:]
+                if device.startswith('0x'):
+                    device = device[2:]
+                if vendor and device:
+                    return f'{vendor}:{device}'
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ''
+
+
+def _linux_force_vulkan_device_selection():
+    if os.environ.get('MESA_VK_DEVICE_SELECT'):
+        return
+    pci_id = _linux_primary_gpu_pci_id()
+    if pci_id:
+        os.environ['MESA_VK_DEVICE_SELECT'] = pci_id
+        print(f'[GPU] Закреплён Vulkan-девайс по умолчанию: {pci_id} (MESA_VK_DEVICE_SELECT)')
 
 
 def _linux_has_vulkan() -> bool:
-    """Грубая проверка доступности Vulkan-драйвера в системе.
-    Используется ДО импорта PyQt6, поэтому только ctypes/os, без Qt."""
     try:
         import ctypes
         import ctypes.util
@@ -104,28 +284,14 @@ def _linux_has_vulkan() -> bool:
 
 
 def _windows_has_d3d11() -> bool:
-    """Проверяет реальную поддержку D3D11 на уровне GPU/драйвера через
-    D3D11CreateDevice. Исправлено: явный restype для HRESULT, проверка S_FALSE."""
     try:
         import ctypes
         d3d11 = ctypes.WinDLL('d3d11.dll')
-        
-        # КРИТИЧНО: явно указываем что функция возвращает HRESULT (32-битное знаковое)
         d3d11.D3D11CreateDevice.restype = ctypes.HRESULT
-        
         feature_levels = (ctypes.c_uint * 4)(0xc100, 0xb000, 0xa100, 0xa000)
         hr = d3d11.D3D11CreateDevice(
-            None,            # pAdapter
-            1,               # D3D_DRIVER_TYPE_HARDWARE
-            None,            # Software
-            0,               # Flags
-            feature_levels, 4,
-            7,               # D3D11_SDK_VERSION
-            None, None, None
+            None, 1, None, 0, feature_levels, 4, 7, None, None, None
         )
-        
-        # S_OK = 0, S_FALSE = 1 — оба считаются успехом
-        # DXGI_ERROR_UNSUPPORTED = 0x887A0004 — не поддерживается
         if hr == 0 or hr == 1:
             print(f'[GPU] D3D11 поддерживается (HRESULT={hr})')
             return True
@@ -137,152 +303,162 @@ def _windows_has_d3d11() -> bool:
         return False
 
 
+# ── Настройки отключения GPU-композитинга для каждого бэкенда ──────
+_disable_vulkan = _read_setting('disable_gpu_compositing_vulkan', True)
+_disable_opengl = _read_setting('disable_gpu_compositing_opengl', False)
+_disable_d3d11   = _read_setting('disable_gpu_compositing_d3d11', False)
+
+# Экспериментально: развести два независимых потребителя Vulkan в Chromium.
+#   --use-angle=vulkan     -> ANGLE (эмуляция GL/GLES) сидит на Vulkan
+#   --enable-features=Vulkan --use-vulkan=native -> Skia/композитор Chromium
+#                              сидит на Vulkan напрямую, без участия ANGLE
+# По умолчанию Chromium сажает оба на один и тот же VkDevice/очередь - на
+# некоторых связках драйвер+GPU (напр. AMD RADV) это приводит к конфликту
+# за очередь ("device busy") и краху GPU-процесса. Раз WebGL и так выключен
+# (--disable-webgl), ANGLE вообще не обязан использовать Vulkan - можно
+# оставить его на обычном GL, а композитор Skia посадить на Vulkan отдельно.
+_vulkan_direct_native = _read_setting('vulkan_direct_native', False)
+
+
+def _vulkan_gl_flags() -> str:
+    if _vulkan_direct_native:
+        return '--use-gl=angle --use-angle=gl --enable-features=Vulkan --use-vulkan=native '
+    return '--use-gl=angle --use-angle=vulkan '
+
+
 if sys.platform == 'win32':
-    _gfx_backend = _read_setting('windows_graphics_backend', 'd3d11')  # 'd3d11' | 'opengl' | 'vulkan'
+    _gfx_backend = _read_setting('windows_graphics_backend', 'd3d11')
     _gfx_auto_detect = _read_setting('gfx_auto_detect', True)
-
-    # Если выбран D3D11 (в том числе по умолчанию), но видеокарта/драйвер
-    # реально его не поддерживают — автоматически откатываемся на OpenGL.
-    # Настройку в settings.json не трогаем: если позже сменят видеокарту
-    # или драйвер, программа снова попробует D3D11 при следующем запуске.
-    # Автоопределение можно отключить в настройках (для теста/отладки) —
-    # тогда ручной выбор пользователя всегда в приоритете, без проверок.
     if _gfx_auto_detect and _gfx_backend == 'd3d11' and not _windows_has_d3d11():
-        print('[GPU] D3D11 не поддерживается видеокартой/драйвером — переключаюсь на OpenGL.')
+        print('[GPU] D3D11 не поддерживается — переключаюсь на OpenGL.')
         _gfx_backend = 'opengl'
-
-    if _gfx_backend == 'opengl':
-        # ==================== OpenGL (Windows, через ANGLE) ====================
-        # --disable-gpu-compositing обязателен именно здесь: без него на
-        # Windows контент QtWebEngine не отображается вовсе (пустой экран).
-        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
+    if _gfx_backend == 'auto':
+        # Экспериментально (2026-09): подход Calibre - вообще не форсировать
+        # ANGLE-бэкенд (--use-gl/--use-angle) и не выключать отдельные
+        # функции (2D canvas, video decode). Chromium сам выбирает лучший
+        # доступный вариант под конкретную видеокарту/драйвер, как в
+        # обычном Chrome. Из наших флагов остаются только общие
+        # memory/CPU-оптимизации (_MEMORY_FLAGS), которые к выбору
+        # GPU-бэкенда отношения не имеют.
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = _MEMORY_FLAGS
+        os.environ.pop('ANGLE_FEATURE_OVERRIDES_ENABLED', None)
+        os.environ.pop('QSG_RHI_BACKEND', None)
+    elif _gfx_backend == 'opengl':
+        flags = (
             f'--use-gl=angle --use-angle=gl '
-            f'--disable-gpu-compositing '
-            f'--disable-gpu-sandbox '
             f'--max-frame-rate=60 '
             f'--disable-accelerated-2d-canvas '
             f'--disable-accelerated-video-decode '
             f'{_MEMORY_FLAGS}'
         )
+        if _disable_opengl:
+            flags = '--disable-gpu-compositing ' + flags
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = flags
         os.environ.pop('ANGLE_FEATURE_OVERRIDES_ENABLED', None)
-        os.environ['QSG_RHI_BACKEND'] = 'opengl'   # ← Qt Quick интерфейс на том же backend'е, что и WebEngine
+        os.environ['QSG_RHI_BACKEND'] = 'opengl'
     elif _gfx_backend == 'vulkan':
-        # ==================== Vulkan (Windows, через ANGLE) ====================
-        # --disable-gpu-compositing нужен и здесь: без него контент
-        # QtWebEngine на Vulkan на Windows тоже не отображается.
-        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
-            f'--use-gl=angle --use-angle=vulkan '
-            f'--disable-gpu-compositing '
-            f'--disable-gpu-sandbox '
+        flags = (
+            f'{_vulkan_gl_flags()}'
             f'--max-frame-rate=60 '
             f'--disable-accelerated-2d-canvas '
             f'--disable-accelerated-video-decode '
             f'{_MEMORY_FLAGS}'
         )
+        if _disable_vulkan:
+            flags = '--disable-gpu-compositing ' + flags
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = flags
         os.environ.pop('ANGLE_FEATURE_OVERRIDES_ENABLED', None)
-        os.environ['QSG_RHI_BACKEND'] = 'vulkan'   # ← Qt Quick интерфейс на том же backend'е, что и WebEngine
+        os.environ['QSG_RHI_BACKEND'] = 'vulkan'
     else:
-        # ==================== DirectX 11 (по умолчанию на Windows) ====================
-        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
+        flags = (
             f'--use-gl=angle --use-angle=d3d11 '
-            f'--disable-gpu-sandbox '
             f'--max-frame-rate=60 '
             f'--disable-accelerated-2d-canvas '
             f'--disable-accelerated-video-decode '
             f'{_MEMORY_FLAGS}'
         )
+        if _disable_d3d11:
+            flags = '--disable-gpu-compositing ' + flags
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = flags
         os.environ['ANGLE_FEATURE_OVERRIDES_ENABLED'] = 'force_d3d11'
-        os.environ['QSG_RHI_BACKEND'] = 'd3d11'    # ← Qt Quick интерфейс на том же backend'е, что и WebEngine
-
+        os.environ['QSG_RHI_BACKEND'] = 'd3d11'
+    # QTWEBENGINE_DISABLE_SANDBOX оставлен как есть (нужен для AppImage/
+    # портативных сборок - без него Chromium может отказаться стартовать
+    # из-за setuid-прав chrome-sandbox). --disable-gpu-sandbox же убран
+    # (2026-09) в рамках теста: с ним GPU у Chromium уходил в тот же
+    # процесс (--in-process-gpu), и потеря контекста (см. крэши с Vulkan-
+    # композитингом) валила рендеринг без возможности изолированного
+    # восстановления. Без --disable-gpu-sandbox GPU остаётся в отдельном
+    # процессе - должно быть чуть больше памяти, но устойчивее к сбоям GPU.
     os.environ['QTWEBENGINE_DISABLE_SANDBOX'] = '1'
 
 elif sys.platform == 'linux':
-    _gfx_backend = _read_setting('linux_graphics_backend', 'vulkan')  # 'vulkan' | 'opengl'
+    _gpu_vendors = _linux_detect_gpu_vendors()
+    if len(_gpu_vendors) > 1:
+        print(f'[GPU] Обнаружена гибридная видеосистема: {", ".join(sorted(_gpu_vendors))}.')
+        _linux_apply_hybrid_gpu_env(_gpu_vendors)
+    _linux_force_vulkan_device_selection()
+
+    _gfx_backend = _read_setting('linux_graphics_backend', 'opengl')
     _gfx_auto_detect = _read_setting('gfx_auto_detect', True)
-
-    # Если выбран Vulkan (в том числе по умолчанию), но в системе нет
-    # рабочего Vulkan-драйвера — автоматически откатываемся на OpenGL.
-    # Настройку в settings.json не трогаем — при появлении драйвера
-    # программа снова попробует Vulkan при следующем запуске.
-    # Автоопределение можно отключить в настройках (для теста/отладки) —
-    # тогда ручной выбор пользователя всегда в приоритете, без проверок.
     if _gfx_auto_detect and _gfx_backend == 'vulkan' and not _linux_has_vulkan():
-        print('[GPU] Vulkan не поддерживается видеокартой/драйвером — переключаюсь на OpenGL.')
+        print('[GPU] Vulkan не поддерживается — переключаюсь на OpenGL.')
         _gfx_backend = 'opengl'
-
-    if _gfx_backend == 'opengl':
-        # ==================== OpenGL ====================
-        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
-            f'--use-gl=angle --use-angle=gl '   # ← WebEngine через ANGLE/OpenGL
-            f'--disable-gpu-sandbox '
+    if _gfx_backend == 'auto':
+        # См. комментарий в ветке Windows выше - тот же подход Calibre.
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = _MEMORY_FLAGS
+        os.environ.pop('QSG_RHI_BACKEND', None)
+    elif _gfx_backend == 'opengl':
+        flags = (
+            f'--use-gl=angle --use-angle=gl '
             f'--max-frame-rate=60 '
             f'{_MEMORY_FLAGS}'
-            # Примечание: --disable-gpu-compositing здесь НЕ добавляется —
-            # он нужен только для устранения проблем композитинга Vulkan+Wayland,
-            # на чистом OpenGL композитинг работает штатно.
         )
-        os.environ['QSG_RHI_BACKEND'] = 'opengl'   # ← Qt Quick интерфейс на том же backend'е, что и WebEngine
+        if _disable_opengl:
+            flags = '--disable-gpu-compositing ' + flags
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = flags
+        os.environ['QSG_RHI_BACKEND'] = 'opengl'
     else:
-        # ==================== Vulkan (по умолчанию на Linux) ====================
-        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = (
-            f'--use-gl=angle --use-angle=vulkan '   # ← WebEngine через Vulkan
-            f'--disable-gpu-compositing '            # ← чинит артефакты композитинга на Wayland; сам рендеринг остаётся на GPU через Vulkan
-            f'--disable-gpu-sandbox '
+        flags = (
+            f'{_vulkan_gl_flags()}'
             f'--max-frame-rate=60 '
             f'{_MEMORY_FLAGS}'
         )
-        os.environ['QSG_RHI_BACKEND'] = 'vulkan'   # ← Qt Quick интерфейс на том же backend'е, что и WebEngine
-
+        if _disable_vulkan:
+            flags = '--disable-gpu-compositing ' + flags
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = flags
+        os.environ['QSG_RHI_BACKEND'] = 'vulkan'
     os.environ['QTWEBENGINE_DISABLE_SANDBOX'] = '1'
 
-# Дополнительные оптимизации Qt WebEngine
+# Дополнительные оптимизации
 os.environ['QTWEBENGINE_LOCALES_PATH'] = ''
 os.environ['QT_FORCE_ASS_LOCALES'] = 'ru,en'
-
-# Отключаем ненужные компоненты для уменьшения памяти
-os.environ['QTWEBENGINE_REMOTE_DEBUGGING'] = ''  # Отключаем отладку
-
-# Важно: устанавливаем максимальный размер памяти до импорта PyQt6
-os.environ['QT_QUICK_CONTROLS_MOBILE'] = '0'  # Отключаем мобильные контролы
+os.environ['QTWEBENGINE_REMOTE_DEBUGGING'] = ''
+os.environ['QT_QUICK_CONTROLS_MOBILE'] = '0'
 
 
-# ─── ЗАГРУЗКА ФЛАГОВ ИЗ ФАЙЛА NovaReader.flags (как в Chromium) ───
 def _load_flags_from_file():
-    """
-    Загружает дополнительные флаги из файла NovaReader.flags,
-    расположенного рядом с исполняемым файлом.
-    Формат файла: одна строка с флагами через пробел.
-    Аналог chrome-flags.conf в Chromium.
-    """
     if not getattr(sys, 'frozen', False):
         return False
-
     flags_file = Path(sys.executable).parent / 'NovaReader.flags'
     if not flags_file.exists():
         return False
-
     try:
         with open(flags_file, 'r', encoding='utf-8') as f:
             content = f.read().strip()
-            if not content:
-                return False
-
+        if not content:
+            return False
         current = os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS', '')
-        # Добавляем флаги из файла в начало (чтобы их можно было переопределить)
         os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = f"{content} {current}".strip()
-        print(f"[App]  Загружены дополнительные флаги из {flags_file.name}")
+        print(f"[App] Загружены дополнительные флаги из {flags_file.name}")
         return True
     except Exception as e:
-        print(f"[App]  Ошибка чтения {flags_file.name}: {e}")
+        print(f"[App] Ошибка чтения {flags_file.name}: {e}")
         return False
 
 
-# Загружаем флаги из файла (если есть)
 _load_flags_from_file()
 
-
-# Теперь можно импортировать остальное
-# Подавляем шум ALSA на Linux
 if sys.platform != 'win32':
     os.environ.setdefault('ALSA_PCM_CARD', 'default')
     os.environ.setdefault('LIBASOUND_DEBUG', '0')
@@ -293,41 +469,127 @@ if sys.platform != 'win32':
     except Exception:
         pass
 
-if sys.platform == 'win32':
-    pass  # рендерер настроен выше через env flags
-elif sys.platform == 'linux':
-    pass  # рендерер настроен выше через env flags
+_rebrand_webengine_process()
 
-# Настройка путей Qt WebEngine для скомпилированной версии
-if getattr(sys, 'frozen', False):
-    app_dir = Path(sys.executable).parent
-
-    # Ищем QtWebEngineProcess
-    for base_dir in [app_dir, app_dir / '_internal', app_dir / 'PyQt6', app_dir / 'PyQt6' / 'Qt6']:
-        if not base_dir.exists():
-            continue
-        proc_path = base_dir / 'libexec' / 'QtWebEngineProcess.exe'
-        if proc_path.exists():
-            os.environ['QTWEBENGINE_PROCESS_PATH'] = str(proc_path)
-            break
-        proc_path = base_dir / 'libexec' / 'QtWebEngineProcess'
-        if proc_path.exists():
-            os.environ['QTWEBENGINE_PROCESS_PATH'] = str(proc_path)
-            break
-
-# ── Диагностика флагов (только в debug-режиме, буферизируем) ───────────────
 _active_flags = os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS', '(не установлены!)')
-_key_flags = ['--single-process', '--disable-gpu-shader-disk-cache',
-              '--disable-web-security', '--disk-cache-size=0',
-              '--max-old-space-size=256']
+# Обновлено вместе с CPU-оптимизацией _MEMORY_FLAGS: --single-process,
+# --disable-gpu-shader-disk-cache и --disk-cache-size=0 больше не
+# выставляются намеренно (см. комментарии у _MEMORY_FLAGS выше).
+_key_flags = ['--disable-web-security', '--disk-cache-size=52428800',
+              '--renderer-process-limit=1']
 _missing = [f for f in _key_flags if f not in _active_flags]
-# Сохраняем диагностику — выведем только если debug_log=True
 _startup_diag = []
 if _missing:
-    _startup_diag.append(f"[App]   ОТСУТСТВУЮТ ключевые флаги: {', '.join(_missing)}")
-_startup_diag.append(f"[App]  Chromium флаги: {_active_flags[:140]}{'...' if len(_active_flags) > 140 else ''}")
+    _startup_diag.append(f"[App] ОТСУТСТВУЮТ ключевые флаги: {', '.join(_missing)}")
+_startup_diag.append(f"[App] Chromium флаги: {_active_flags[:140]}{'...' if len(_active_flags) > 140 else ''}")
 
-from PyQt6.QtWidgets import QApplication, QSplashScreen
+
+# ── Проверка системных зависимостей X11 ────────────────────────────────────
+_SO_TO_APT_PACKAGE = {
+    'libxcb-cursor.so.0':      'libxcb-cursor0',
+    'libxcb-icccm.so.4':       'libxcb-icccm4',
+    'libxcb-image.so.0':       'libxcb-image0',
+    'libxcb-keysyms.so.1':     'libxcb-keysyms1',
+    'libxcb-randr.so.0':       'libxcb-randr0',
+    'libxcb-render-util.so.0': 'libxcb-render-util0',
+    'libxcb-shape.so.0':       'libxcb-shape0',
+    'libxcb-shm.so.0':         'libxcb-shm0',
+    'libxcb-sync.so.1':        'libxcb-sync1',
+    'libxcb-xfixes.so.0':      'libxcb-xfixes0',
+    'libxcb-xinerama.so.0':    'libxcb-xinerama0',
+    'libxcb-glx.so.0':         'libxcb-glx0',
+    'libxkbcommon-x11.so.0':   'libxkbcommon-x11-0',
+    'libxkbcommon.so.0':       'libxkbcommon0',
+    'libGL.so.1':              'libgl1',
+    'libEGL.so.1':             'libegl1',
+    'libdbus-1.so.3':          'libdbus-1-3',
+    'libfontconfig.so.1':      'libfontconfig1',
+}
+
+
+def _find_qxcb_plugin_path():
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec('PyQt6')
+        if spec is None or not spec.submodule_search_locations:
+            return None
+        pyqt6_dir = Path(list(spec.submodule_search_locations)[0])
+        for rel in ('Qt6/plugins/platforms/libqxcb.so', 'Qt/plugins/platforms/libqxcb.so'):
+            p = pyqt6_dir / rel
+            if p.exists():
+                return p
+    except Exception:
+        pass
+    return None
+
+
+def _check_linux_x11_missing_libs():
+    if sys.platform != 'linux':
+        return []
+    plugin_path = _find_qxcb_plugin_path()
+    if plugin_path is None:
+        return []
+    try:
+        result = subprocess.run(['ldd', str(plugin_path)], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return []
+    missing = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if '=> not found' in line:
+            missing.append(line.split('=>')[0].strip())
+    return missing
+
+
+def _show_missing_deps_message(missing_libs=None, missing_pip_pkgs=None):
+    lines = []
+    apt_packages = []
+    if missing_libs:
+        apt_packages = sorted({_SO_TO_APT_PACKAGE.get(lib, lib) for lib in missing_libs})
+        lines.append("Не хватает системных библиотек для запуска под X11:")
+        lines.extend(f"  • {lib}" for lib in missing_libs)
+        lines.append("")
+        lines.append("Установите пакеты (Debian/Ubuntu):")
+        lines.append("  sudo apt install " + ' '.join(apt_packages))
+        lines.append("")
+        lines.append("На Fedora/RHEL названия пакетов могут отличаться —")
+        lines.append("ищите по имени библиотеки в 'dnf provides <имя>.so'.")
+    if missing_pip_pkgs:
+        if lines:
+            lines.append("")
+        lines.append("Не хватает Python-пакетов:")
+        lines.extend(f"  • {pkg}" for pkg in missing_pip_pkgs)
+        lines.append("")
+        lines.append("Установите их командой:")
+        lines.append("  pip install " + ' '.join(missing_pip_pkgs))
+    message = "NovaReader не может запуститься.\n" + "\n".join(lines)
+    print(f"\n{'='*70}\n{message}\n{'='*70}\n", file=sys.stderr)
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        messagebox.showerror("NovaReader — не хватает зависимостей", message)
+        root.destroy()
+    except Exception:
+        pass
+
+
+_missing_x11_libs = _check_linux_x11_missing_libs()
+if _missing_x11_libs:
+    _show_missing_deps_message(missing_libs=_missing_x11_libs)
+    sys.exit(1)
+
+try:
+    from PyQt6.QtWidgets import QApplication, QSplashScreen
+except ImportError as _pyqt_err:
+    _missing_pip = ['PyQt6']
+    if 'WebEngine' in str(_pyqt_err) or 'QtWebEngine' in str(_pyqt_err):
+        _missing_pip = ['PyQt6-WebEngine']
+    _show_missing_deps_message(missing_pip_pkgs=_missing_pip)
+    sys.exit(1)
+
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFontDatabase, QPixmap, QPainter, QColor, QFont
 import time
@@ -335,18 +597,8 @@ import subprocess
 
 
 def _setup_logging(config):
-    """
-    Настройка логирования.
-
-    ⚠️ НА WINDOWS: полное отключение подавления вывода!
-    debug_log=True  → все print() и ошибки пишутся в файл debug.log.
-    debug_log=False → вывод НЕ подавляется (на Windows это безопаснее).
-    """
     import os as _os
-
     debug_enabled = config.get('debug_log', False)
-
-    # Windows: НИКОГДА не подавляем вывод — иначе программа падает молча
     if sys.platform == 'win32':
         if debug_enabled:
             try:
@@ -365,11 +617,8 @@ def _setup_logging(config):
             except Exception as e:
                 print(f"[Warning] Не удалось открыть лог-файл: {e}", flush=True)
         else:
-            # На Windows НЕ ПОДАВЛЯЕМ вывод, чтобы видеть ошибки
             print("[Setup] Windows: подавление вывода ОТКЛЮЧЕНО", flush=True)
-        return
-
-    # Linux / macOS: оставляем старую логику
+            return
     if debug_enabled:
         log_path = config.config_dir / 'debug.log'
         try:
@@ -387,7 +636,6 @@ def _setup_logging(config):
         except Exception:
             pass
     else:
-        # На Linux/Mac можно подавлять
         try:
             devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
             _os.dup2(devnull_fd, 1)
@@ -407,7 +655,6 @@ from wizard_window import WelcomeWizard
 
 
 def _get_pid_file() -> Path:
-    """Путь к PID-файлу текущего экземпляра."""
     if sys.platform == 'win32':
         base = Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData' / 'Local'))
     else:
@@ -416,7 +663,6 @@ def _get_pid_file() -> Path:
 
 
 def _is_process_running(pid: int) -> bool:
-    """Проверяет, жив ли процесс с данным PID."""
     try:
         if sys.platform == 'win32':
             import ctypes
@@ -435,33 +681,29 @@ def _is_process_running(pid: int) -> bool:
 
 
 def _wait_for_previous_instance():
-    """Ждёт завершения предыдущего экземпляра NovaReader."""
     pid_file = _get_pid_file()
     if pid_file.exists():
         try:
             old_pid = int(pid_file.read_text().strip())
         except (ValueError, OSError):
             old_pid = None
-
         if old_pid and old_pid != os.getpid() and _is_process_running(old_pid):
-            print(f"[App]  Предыдущий экземпляр (PID {old_pid}) ещё работает, ждём...")
+            print(f"[App] Предыдущий экземпляр (PID {old_pid}) ещё работает, ждём...")
             import time as _time
             deadline = _time.monotonic() + 8.0
             while _time.monotonic() < deadline and _is_process_running(old_pid):
                 _time.sleep(0.25)
             if _is_process_running(old_pid):
-                print(f"[App]  Предыдущий экземпляр не завершился за 8 с, продолжаем")
+                print(f"[App] Предыдущий экземпляр не завершился за 8 с, продолжаем")
             else:
-                print(f"[App]  Предыдущий экземпляр завершился")
-
+                print(f"[App] Предыдущий экземпляр завершился")
     try:
         pid_file.write_text(str(os.getpid()))
     except OSError as e:
-        print(f"[App]  Не удалось записать PID-файл: {e}")
+        print(f"[App] Не удалось записать PID-файл: {e}")
 
 
 def _remove_pid_file():
-    """Удаляет PID-файл при завершении."""
     try:
         _get_pid_file().unlink(missing_ok=True)
     except OSError:
@@ -469,8 +711,6 @@ def _remove_pid_file():
 
 
 def _get_webengine_cache_dir() -> Path:
-    """Возвращает путь к директории кэша WebEngine."""
-    import os
     app_name = "NovaReader"
     if sys.platform == 'win32':
         base = Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData' / 'Local'))
@@ -480,7 +720,6 @@ def _get_webengine_cache_dir() -> Path:
 
 
 def _clear_webengine_cache():
-    """Удаляет накопившийся GPU shader cache и Code Cache между сессиями."""
     import shutil
     cache_root = _get_webengine_cache_dir()
     targets = [
@@ -498,41 +737,54 @@ def _clear_webengine_cache():
                 shutil.rmtree(target)
                 cleared.append(target.name)
             except Exception as e:
-                print(f"[Cache]  Не удалось очистить {target.name}: {e}")
+                print(f"[Cache] Не удалось очистить {target.name}: {e}")
     if cleared:
-        print(f"[Cache]  Очищено: {', '.join(cleared)}")
+        print(f"[Cache] Очищено: {', '.join(cleared)}")
     else:
-        print("[Cache]  Кэш WebEngine чист")
+        print("[Cache] Кэш WebEngine чист")
+
+
+def _trim_memory_once():
+    try:
+        import ctypes
+        if sys.platform == 'win32':
+            kernel32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            result = psapi.EmptyWorkingSet(kernel32.GetCurrentProcess())
+            print(f'[Memory] EmptyWorkingSet -> {"OK" if result else "FAILED"}')
+        else:
+            libc = ctypes.CDLL('libc.so.6', use_errno=True)
+            result = libc.malloc_trim(0)
+            print(f'[Memory] malloc_trim(0) -> {result} (1=OK, страницы возвращены ОС)')
+    except Exception as e:
+        print(f"[Memory] trim ошибка: {e}")
 
 
 def _configure_webengine_profile():
-    """Настраивает профиль WebEngine ДО создания любого QWebEngineView."""
     from PyQt6.QtWebEngineCore import QWebEngineProfile
-
     profile = QWebEngineProfile.defaultProfile()
-
     try:
-        profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
+        # DiskHttpCache (было NoCache): небольшой дисковый кэш даёт Chromium
+        # хранить скомпилированный V8-байткод движка читалки (ibc/*.js) между
+        # запусками/открытиями книг вместо перекомпиляции JS каждый раз -
+        # экономит CPU на старте и при открытии книги ценой ~50 МБ на диске
+        # (не в RAM).
+        profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
     except AttributeError:
         pass
-    profile.setHttpCacheMaximumSize(0)
-
+    profile.setHttpCacheMaximumSize(50 * 1024 * 1024)
     try:
-        profile.setPersistentCookiesPolicy(
-            QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
+        profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
     except AttributeError:
         pass
-
     cache_dir = _get_webengine_cache_dir()
     try:
         profile.setCachePath(str(cache_dir))
     except AttributeError:
         pass
+    print(f"[Profile] WebEngine профиль настроен (cache→{cache_dir.name}, storage→tmp)")
 
-    print(f"[Profile]  WebEngine профиль настроен (cache→{cache_dir.name}, storage→tmp)")
 
-
-# ── Иконки/пути ──────────────────────────────────────────────────────────────
 _ICON_NAMES_WIN = ["NovaReader_Windows.ico", "NovaReader.ico", "icon.ico",
                    "NovaReader_Linux.png", "NovaReader.png", "icon.png"]
 _ICON_NAMES_LIN = ["NovaReader_Linux.png", "NovaReader.png", "icon.png",
@@ -554,14 +806,13 @@ def _find_icon_path() -> Path | None:
 
 
 def _set_app_icon(app):
-    """Устанавливает иконку приложения."""
     from PyQt6.QtGui import QIcon
     p = _find_icon_path()
     if p:
         app.setWindowIcon(QIcon(str(p)))
         print(f"[App] Иконка: {p.name}")
     else:
-        print("[App]  Иконка не найдена")
+        print("[App] Иконка не найдена")
 
 
 def _load_fonts():
@@ -569,20 +820,13 @@ def _load_fonts():
         ibc_dir = Path(sys.executable).parent / 'ibc'
     else:
         ibc_dir = Path(__file__).parent / 'ibc'
-
-    # Собираем папки для загрузки шрифтов:
-    # 1. ibc/ — системные шрифты программы
-    # 2. ibc/fonts/ — пользовательские шрифты (если программа в rw-папке)
-    # 3. ~/.config/NovaReader/fonts/ — пользовательские шрифты (fallback)
     import os
     if sys.platform == 'win32':
         cfg_base = Path(os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming'))
     else:
         cfg_base = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
     user_fonts_dir = cfg_base / 'NovaReader' / 'fonts'
-
     dirs_to_scan = [ibc_dir, ibc_dir / 'fonts', user_fonts_dir]
-
     for fonts_dir in dirs_to_scan:
         if not fonts_dir.exists():
             continue
@@ -590,27 +834,23 @@ def _load_fonts():
         for ttf in sorted(fonts_dir.glob(pattern)):
             fid = QFontDatabase.addApplicationFont(str(ttf))
             if fid >= 0:
-                print(f"[Font]  {ttf.name}: {QFontDatabase.applicationFontFamilies(fid)}")
+                print(f"[Font] {ttf.name}: {QFontDatabase.applicationFontFamilies(fid)}")
             else:
-                print(f"[Font]  Ошибка загрузки: {ttf.name}")
+                print(f"[Font] Ошибка загрузки: {ttf.name}")
+
 
 def _make_splash_pixmap(icon_path: Path | None, w: int = 400, h: int = 260) -> QPixmap:
-    """Рисует сплэш-экран."""
     px = QPixmap(w, h)
     px.fill(Qt.GlobalColor.transparent)
-
     painter = QPainter(px)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
     bg = QColor(28, 28, 32)
     painter.setBrush(bg)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawRoundedRect(0, 0, w, h, 16, 16)
-
     painter.setPen(QColor(70, 70, 85))
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.drawRoundedRect(1, 1, w - 2, h - 2, 15, 15)
-
     icon_h = 0
     if icon_path and icon_path.exists():
         icon_px = QPixmap(str(icon_path))
@@ -622,7 +862,6 @@ def _make_splash_pixmap(icon_path: Path | None, w: int = 400, h: int = 260) -> Q
             ix = (w - size) // 2
             painter.drawPixmap(ix, 28, icon_px)
             icon_h = size + 16
-
     title_font = QFont()
     title_font.setPointSize(22)
     title_font.setWeight(QFont.Weight.Bold)
@@ -630,20 +869,17 @@ def _make_splash_pixmap(icon_path: Path | None, w: int = 400, h: int = 260) -> Q
     painter.setPen(QColor(232, 232, 240))
     ty = 28 + icon_h
     painter.drawText(0, ty, w, 38, Qt.AlignmentFlag.AlignHCenter, "NovaReader")
-
     sub_font = QFont()
     sub_font.setPointSize(11)
     painter.setFont(sub_font)
     painter.setPen(QColor(130, 130, 150))
     painter.drawText(0, ty + 42, w, 24, Qt.AlignmentFlag.AlignHCenter,
                      "Инициализация…")
-
     painter.end()
     return px
 
 
 def _build_reader_cmd(book_path: str) -> list:
-    """Возвращает команду для запуска читалки в subprocess."""
     exe_dir = Path(sys.executable).parent
     for app_name in ('NovaReader', 'NovaReader.exe', 'main', 'main.exe'):
         app_bin = exe_dir / app_name
@@ -652,8 +888,16 @@ def _build_reader_cmd(book_path: str) -> list:
     return [sys.executable, str(Path(__file__).resolve()), '--reader', book_path]
 
 
+def _build_search_cmd() -> list:
+    exe_dir = Path(sys.executable).parent
+    for app_name in ('NovaReader', 'NovaReader.exe', 'main', 'main.exe'):
+        app_bin = exe_dir / app_name
+        if app_bin.exists():
+            return [str(app_bin), '--search']
+    return [sys.executable, str(Path(__file__).resolve()), '--search']
+
+
 class _SubprocessAppInstance:
-    """Заглушка app_instance для ReaderWindow запущенного в --reader режиме."""
     def __init__(self, window_ref_holder):
         self._holder = window_ref_holder
         self.library_window = None
@@ -670,42 +914,32 @@ class _SubprocessAppInstance:
 
 
 def _ask_book_action(app, parent_window, book_path: str, config) -> str:
-    """
-    Показывает диалог выбора действия при открытии книги через ассоциацию.
-    Возвращает: 'open' | 'add_open' | 'add_only' | 'cancel'
-    """
     from pathlib import Path as _P
     from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
-                                  QPushButton, QLabel)
+                                 QPushButton, QLabel)
     from PyQt6.QtGui import QFont as _QF
     from PyQt6.QtCore import Qt as _Qt
-
     lang = config.get('language', 'ru')
     if lang == 'ru':
-        t_title  = 'Открыть книгу'
-        t_open   = 'Открыть'
-        t_addopen= 'Добавить и открыть'
-        t_add    = 'Только добавить'
+        t_title = 'Открыть книгу'
+        t_open = 'Открыть'
+        t_addopen = 'Добавить и открыть'
+        t_add = 'Только добавить'
         t_cancel = 'Отмена'
     else:
-        t_title  = 'Open book'
-        t_open   = 'Open'
-        t_addopen= 'Add and open'
-        t_add    = 'Add to library'
+        t_title = 'Open book'
+        t_open = 'Open'
+        t_addopen = 'Add and open'
+        t_add = 'Add to library'
         t_cancel = 'Cancel'
-
-    # Цвета из конфига темы
     try:
-        from library_window import BG, SURFACE, BORDER, ACCENT, TEXT, SUB
         from library_window import init_lib_colors
         init_lib_colors(config)
         from library_window import BG, SURFACE, BORDER, ACCENT, TEXT, SUB
     except Exception:
-        BG='#1e1e2e'; SURFACE='#2a2a3a'; BORDER='#3a3a4a'
-        ACCENT='#7c5cbf'; TEXT='#e0e0e0'; SUB='#888888'
-
+        BG = '#1e1e2e'; SURFACE = '#2a2a3a'; BORDER = '#3a3a4a'
+        ACCENT = '#7c5cbf'; TEXT = '#e0e0e0'; SUB = '#888888'
     result = ['cancel']
-
     dlg = QDialog(parent_window if parent_window else None)
     dlg.setWindowTitle('NovaReader')
     dlg.setModal(True)
@@ -721,88 +955,81 @@ def _ask_book_action(app, parent_window, book_path: str, config) -> str:
         f'QPushButton:pressed{{background:{ACCENT};'
         f'color:#fff;border-color:{ACCENT};}}'
     )
-
     lay = QVBoxLayout(dlg)
     lay.setSpacing(14)
     lay.setContentsMargins(24, 22, 24, 20)
-
-    # Заголовок
     lbl_title = QLabel(t_title)
     f = _QF(); f.setPointSize(13); f.setBold(True)
     lbl_title.setFont(f)
     lay.addWidget(lbl_title)
-
-    # Имя файла
     lbl_name = QLabel(_P(book_path).name)
     lbl_name.setWordWrap(True)
     lbl_name.setStyleSheet(f'color:{SUB};font-size:12px;')
     lay.addWidget(lbl_name)
-
     lay.addSpacing(4)
-
-    # Кнопки — акцент на «Добавить и открыть»
-    btn_open    = QPushButton(t_open)
+    btn_open = QPushButton(t_open)
     btn_addopen = QPushButton(t_addopen)
-    btn_add     = QPushButton(t_add)
-    btn_cancel  = QPushButton(t_cancel)
-
+    btn_add = QPushButton(t_add)
+    btn_cancel = QPushButton(t_cancel)
     btn_addopen.setStyleSheet(
         f'QPushButton{{background:{ACCENT};color:#fff;'
         f'border:1px solid {ACCENT};border-radius:6px;'
         f'padding:8px 14px;font-size:13px;min-width:0;}}'
         f'QPushButton:hover{{background:{ACCENT};opacity:.9;}}'
     )
-
     row = QHBoxLayout()
     row.setSpacing(8)
     for b in (btn_open, btn_addopen, btn_add, btn_cancel):
         row.addWidget(b)
     lay.addLayout(row)
-
-    btn_open.clicked.connect(   lambda: (result.__setitem__(0,'open'),     dlg.accept()))
-    btn_addopen.clicked.connect(lambda: (result.__setitem__(0,'add_open'), dlg.accept()))
-    btn_add.clicked.connect(    lambda: (result.__setitem__(0,'add_only'), dlg.accept()))
-    btn_cancel.clicked.connect( dlg.reject)
-
+    btn_open.clicked.connect(lambda: (result.__setitem__(0, 'open'), dlg.accept()))
+    btn_addopen.clicked.connect(lambda: (result.__setitem__(0, 'add_open'), dlg.accept()))
+    btn_add.clicked.connect(lambda: (result.__setitem__(0, 'add_only'), dlg.accept()))
+    btn_cancel.clicked.connect(dlg.reject)
     dlg.exec()
     return result[0]
 
 
 def _run_reader_mode(book_path: str, from_association: bool = False):
-    """Режим читалки: запускается когда NovaReader вызван с флагом --reader."""
+    from PyQt6.QtCore import Qt as _Qt
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtWebEngineCore import QWebEngineProfile
-
     if not Path(book_path).exists():
         print(f"[ReaderMode] Файл не найден: {book_path}")
         sys.exit(1)
-
+    # AA_ShareOpenGLContexts ОБЯЗАН быть выставлен до создания QApplication
+    # при использовании QWebEngineView (задокументированное требование Qt,
+    # не специфично для платформы/видеокарты - так же делает Calibre в
+    # calibre/gui2/__init__.py). Раньше у нас reader_window (а с ним и
+    # QWebEngineWidgets) импортировался ПОСЛЕ QApplication(...) - Qt в
+    # такой ситуации сам пытается восстановиться, но не гарантированно на
+    # всех платформах/драйверах. Явная установка убирает эту гонку.
+    QApplication.setAttribute(_Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app = QApplication(sys.argv)
     app.setApplicationName("NovaReader")
-    _load_fonts()  # загружаем шрифты и в режиме ридера
+    _load_fonts()
     _set_app_icon(app)
-
     profile = QWebEngineProfile.defaultProfile()
     try:
-        profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
+        # DiskHttpCache (было NoCache): небольшой дисковый кэш даёт Chromium
+        # хранить скомпилированный V8-байткод движка читалки (ibc/*.js) между
+        # запусками/открытиями книг вместо перекомпиляции JS каждый раз -
+        # экономит CPU на старте и при открытии книги ценой ~50 МБ на диске
+        # (не в RAM).
+        profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
     except AttributeError:
         pass
-    profile.setHttpCacheMaximumSize(0)
+    profile.setHttpCacheMaximumSize(50 * 1024 * 1024)
     try:
-        profile.setPersistentCookiesPolicy(
-            QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
+        profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
     except AttributeError:
         pass
-
     from config import Config
     from reader_window import ReaderWindow
-
     config = Config()
-    _setup_logging(config)  # логи читалки тоже пишем в debug.log если включено
-
+    _setup_logging(config)
     _window_ref = [None]
     app_instance = _SubprocessAppInstance(lambda: _window_ref[0])
-
     window = ReaderWindow(
         config,
         tts_controller=None,
@@ -811,15 +1038,10 @@ def _run_reader_mode(book_path: str, from_association: bool = False):
     )
     _window_ref[0] = window
     window.destroyed.connect(lambda: _window_ref.__setitem__(0, None))
-
     if from_association:
-        # Показываем диалог ДО показа окна читалки
-        # чтобы не ждать инициализации WebEngine зря
         action = _ask_book_action(app, None, book_path, config)
         if action == 'cancel':
             sys.exit(0)
-
-        # Добавляем в библиотеку если нужно
         if action in ('add_open', 'add_only'):
             try:
                 from book_parser import BookParser
@@ -829,17 +1051,13 @@ def _run_reader_mode(book_path: str, from_association: bool = False):
                     print(f'[Assoc] Книга добавлена: {book_path}')
             except Exception as e:
                 print(f'[Assoc] Ошибка добавления: {e}')
-
         if action == 'add_only':
             sys.exit(0)
-
-        # Открываем читалку — WebEngine уже инициализирован пока показывался диалог
         window.load_book(book_path)
         window.show()
     else:
         window.load_book(book_path)
         window.show()
-
     exit_code = app.exec()
     _window_ref[0] = None
     sys.exit(exit_code)
@@ -847,9 +1065,10 @@ def _run_reader_mode(book_path: str, from_association: bool = False):
 
 class EbookReader:
     def __init__(self):
+        from PyQt6.QtCore import Qt as _Qt
+        # См. комментарий в _run_reader_mode - тот же самый фикс.
+        QApplication.setAttribute(_Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
         self.app = QApplication(sys.argv)
-        # Принудительное сглаживание шрифтов на уровне программы,
-        # независимо от системных настроек
         from PyQt6.QtGui import QFont
         self.app.setDesktopSettingsAware(False)
         default_font = self.app.font()
@@ -861,41 +1080,29 @@ class EbookReader:
         self.app.setApplicationName("NovaReader")
         self.app.setQuitOnLastWindowClosed(False)
         _load_fonts()
-
         self.config = Config()
         _setup_logging(self.config)
-        # Сохраняем backend, который реально включился после автоопределения
-        # (main.py мог откатить Vulkan/D3D11 на OpenGL, если GPU не поддерживает
-        # выбранный). Отдельный технический ключ — настройку-предпочтение
-        # пользователя не трогаем, чтобы при обновлении драйвера/видеокарты
-        # программа снова попробовала исходный выбор.
         try:
             self.config.set('_active_graphics_backend', _gfx_backend)
         except Exception:
             pass
         _set_app_icon(self.app)
-        # Прогреваем кэш шрифтов сразу — чтобы getSettings() не тормозил при открытии книги
         try:
             self.config.get_font_file_map()
         except Exception:
             pass
-
         self.library_window = None
         self.settings_window = None
         self.reader_windows = []
         self._reader_procs: list[tuple[str, subprocess.Popen]] = []
-        self._webengine_ready = False
-
+        self._webengine_ready = True
         self._initialized = False
         self._proc_watchdog = QTimer()
         self._proc_watchdog.setInterval(1000)
         self._proc_watchdog.timeout.connect(self._check_reader_procs)
         self._proc_watchdog.start()
-
         _wait_for_previous_instance()
         _clear_webengine_cache()
-        _configure_webengine_profile()
-
         icon_path = _find_icon_path()
         splash_px = _make_splash_pixmap(icon_path)
         self._splash = QSplashScreen(splash_px,
@@ -904,75 +1111,44 @@ class EbookReader:
         self._splash.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._splash.show()
         self.app.processEvents()
-
-        self._warmup_view = None
-        self._start_webengine_warmup()
-
+        self._splash_shown_at = time.monotonic()
         if self.config.is_first_run():
             self._show_wizard()
         else:
             self._open_library_when_ready()
 
-    def _start_webengine_warmup(self):
-        """Прогрев WebEngine: about:blank + фиксированная пауза 3 секунды."""
-        from PyQt6.QtWebEngineWidgets import QWebEngineView
-        from PyQt6.QtCore import QUrl
-
-        self._warmup_view = QWebEngineView()
-        self._warmup_view.hide()
-        self._warmup_view.resize(1, 1)
-
-        def _on_blank_loaded(_ok):
-            elapsed_blank = int((time.monotonic() - self._warmup_start) * 1000)
-            print(f"[App]  Chromium запущен ({elapsed_blank} мс), ждём 3 с...")
-
-            def _on_ready():
-                if self._webengine_ready:
-                    return
-                self._webengine_ready = True
-                elapsed = int((time.monotonic() - self._warmup_start) * 1000)
-                print(f"[App]  WebEngine готов ({elapsed} мс)")
-                self._warmup_view.deleteLater()
-                self._warmup_view = None
-                if getattr(self, '_library_pending', False):
-                    self._library_pending = False
-                    self._finish_show_library()
-
-            QTimer.singleShot(3000, _on_ready)
-
-        self._warmup_view.loadFinished.connect(_on_blank_loaded)
-        self._warmup_view.load(QUrl("about:blank"))
-        self._warmup_start = time.monotonic()
-
-        def _timeout():
-            if not self._webengine_ready:
-                print("[App]  WebEngine warmup timeout — продолжаем")
-                if hasattr(self, '_warmup_view') and self._warmup_view:
-                    self._warmup_view.deleteLater()
-                    self._warmup_view = None
-                self._webengine_ready = True
-                if getattr(self, '_library_pending', False):
-                    self._library_pending = False
-                    self._finish_show_library()
-
-        QTimer.singleShot(10000, _timeout)
-        print("[App]  Инициализация WebEngine...")
-
     def _open_library_when_ready(self):
-        """Открывает библиотеку: сразу если WebEngine готов, иначе — отложенно."""
         if self._webengine_ready:
             self._finish_show_library()
         else:
             self._library_pending = True
-            print("[App]  Библиотека отложена — ждём WebEngine…")
+            print("[App] Библиотека отложена — ждём WebEngine…")
+
+    def _schedule_post_startup_cleanup(self):
+        def _cleanup():
+            import gc
+            gc.collect()
+            _trim_memory_once()
+            QTimer.singleShot(30000, _cleanup)
+        QTimer.singleShot(2000, _cleanup)
 
     def _finish_show_library(self):
-        """Закрывает сплэш и открывает окно библиотеки."""
-        if hasattr(self, '_splash') and self._splash:
-            self._splash.close()
-            self._splash = None
-            print("[App]  Сплэш закрыт")
-        self.show_library()
+        min_splash_ms = 900
+        elapsed = int((time.monotonic() - getattr(self, '_splash_shown_at', 0)) * 1000)
+        remaining = max(0, min_splash_ms - elapsed)
+
+        def _close_and_show():
+            if hasattr(self, '_splash') and self._splash:
+                self._splash.close()
+                self._splash = None
+                print("[App] Сплэш закрыт")
+            self.show_library()
+            self._schedule_post_startup_cleanup()
+
+        if remaining > 0:
+            QTimer.singleShot(remaining, _close_and_show)
+        else:
+            _close_and_show()
 
     def _show_wizard(self):
         if hasattr(self, '_splash') and self._splash:
@@ -991,30 +1167,25 @@ class EbookReader:
 
     def show_library(self):
         if hasattr(self, '_showing_library') and self._showing_library:
-            print("[App]  Защита от рекурсивного show_library()")
+            print("[App] Защита от рекурсивного show_library()")
             return
         if self.library_window and self.library_window.isVisible():
             print("[App] Библиотека уже открыта")
             self.library_window.raise_()
             self.library_window.activateWindow()
             return
-
         self._showing_library = True
         try:
             if not self.library_window:
                 print("[App] Создаём новое окно библиотеки")
                 self.library_window = LibraryWindow(self.config)
-                self.library_window.setAttribute(
-                    Qt.WidgetAttribute.WA_DeleteOnClose, True)
+                self.library_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
                 self.library_window.book_selected.connect(self.open_book)
                 self.library_window.destroyed.connect(self._on_library_closed)
-            else:
-                print("[App] Показываем существующее окно библиотеки")
-
-            self.library_window.show()
-            self._initialized = True
-            self.library_window.raise_()
-            self.library_window.activateWindow()
+                self.library_window.show()
+                self._initialized = True
+                self.library_window.raise_()
+                self.library_window.activateWindow()
         finally:
             self._showing_library = False
 
@@ -1026,32 +1197,22 @@ class EbookReader:
 
     def open_book(self, book_path):
         if hasattr(self, '_opening_book') and self._opening_book:
-            print("[App]  Защита от рекурсивного open_book()")
+            print("[App] Защита от рекурсивного open_book()")
             return
-
         self._opening_book = True
         try:
             print(f"[App] Opening book: {book_path}")
-
             for bp, proc in list(self._reader_procs):
                 if bp == book_path and proc.poll() is None:
                     print(f"[App] Книга уже открыта в процессе PID={proc.pid}, пропускаем")
                     return
-
             self.config._positions = self.config._load_positions()
             self.config.mark_as_read(book_path)
-
-            # Пересборку карточек библиотеки откладываем на "после запуска":
-            # это тяжёлая операция (deleteLater + пересоздание всех BookCard),
-            # и на горячем пути открытия книги она не нужна — карточка "прочитано"
-            # может обновиться на секунду позже без разницы для пользователя.
-            # Раньше вызывалась синхронно ДО запуска процесса читалки, из-за чего
-            # клик по обложке мог "теряться"/задерживаться, если очередь событий
-            # главного потока уже была занята (например, обработкой вывода
-            # активной фоновой загрузки голоса TTS).
             if self.library_window:
-                QTimer.singleShot(0, self.library_window._on_library_updated)
-
+                def _refresh_one():
+                    if not self.library_window.update_single_book_progress(book_path):
+                        self.library_window._on_library_updated()
+                QTimer.singleShot(0, _refresh_one)
             cmd = _build_reader_cmd(book_path)
             proc = subprocess.Popen(cmd, env=os.environ.copy())
             self._reader_procs.append((book_path, proc))
@@ -1060,25 +1221,26 @@ class EbookReader:
             self._opening_book = False
 
     def _check_reader_procs(self):
-        """Вызывается каждую секунду. Убирает завершившиеся subprocess'ы."""
         if not self._initialized:
             return
         before = len(self._reader_procs)
-        self._reader_procs = [(bp, p) for bp, p in self._reader_procs
-                              if p.poll() is None]
+        finished_paths = [bp for bp, p in self._reader_procs if p.poll() is not None]
+        self._reader_procs = [(bp, p) for bp, p in self._reader_procs if p.poll() is None]
         finished = before - len(self._reader_procs)
         if finished:
             print(f"[App] Читалок завершилось: {finished}, осталось: {len(self._reader_procs)}")
-            # Перечитываем settings.json — ридер мог сохранить новые настройки
-            # (шрифт и др.), иначе следующий config.save() затрёт их старыми данными
             try:
                 self.config.reload()
             except Exception as e:
                 print(f"[App] config.reload() ошибка: {e}")
             self.config._positions = self.config._load_positions()
             if self.library_window and self.library_window.isVisible():
-                self.library_window._on_library_updated()
-
+                all_found = True
+                for bp in finished_paths:
+                    if not self.library_window.update_single_book_progress(bp):
+                        all_found = False
+                if not all_found:
+                    self.library_window._on_library_updated()
         if not self._reader_procs and not self.library_window:
             print("[App] Все читалки закрыты и библиотека закрыта — выход")
             self._proc_watchdog.stop()
@@ -1087,8 +1249,6 @@ class EbookReader:
     def run(self):
         def _on_quit():
             _remove_pid_file()
-            # Перечитываем settings.json с диска — ридер мог изменить настройки
-            # в своём subprocess, и мы не должны перезаписать его изменения
             try:
                 self.config.reload()
             except Exception:
@@ -1099,16 +1259,11 @@ class EbookReader:
                         proc.terminate()
                     except OSError:
                         pass
-
         self.app.aboutToQuit.connect(_on_quit)
         return self.app.exec()
 
 
 def _build_piper_worker_cmd(voice_name: str, onnx_url: str, json_url: str, voices_dir: str) -> list:
-    """Возвращает команду для запуска voice_download_worker в subprocess —
-    той же логикой, что и _build_reader_cmd для --reader: в собранном виде
-    ищем сам exe рядом (NovaReader/NovaReader.exe/main/main.exe) и запускаем
-    его же с флагом --piper-worker; в dev-режиме — обычный python3 + .py."""
     exe_dir = Path(sys.executable).parent
     for app_name in ('NovaReader', 'NovaReader.exe', 'main', 'main.exe'):
         app_bin = exe_dir / app_name
@@ -1118,13 +1273,56 @@ def _build_piper_worker_cmd(voice_name: str, onnx_url: str, json_url: str, voice
     return [sys.executable, str(worker_script), voice_name, onnx_url, json_url, voices_dir]
 
 
+def _run_search_mode():
+    from PyQt6.QtCore import Qt as _Qt
+    from PyQt6.QtWidgets import QApplication
+    # См. комментарий в _run_reader_mode. Тут WebEngine не используется, но
+    # ставим для единообразия со всеми остальными QApplication программы.
+    QApplication.setAttribute(_Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    app = QApplication(sys.argv)
+    app.setApplicationName("NovaReader")
+    app.setStyle('Fusion')
+    from config import Config
+    import library_window as _lw
+    config = Config()
+    _lw.init_lib_colors(config)
+    from book_search_window import BookSearchWindow, _apply_search_style
+    _apply_search_style(app)
+    _load_fonts()
+    _set_app_icon(app)
+    _setup_logging(config)
+    pid_file = None
+    try:
+        if sys.platform == 'win32':
+            base = Path(os.environ.get('LOCALAPPDATA', Path.home()))
+        else:
+            base = Path(os.environ.get('XDG_RUNTIME_DIR',
+                                       Path(os.environ.get('TMPDIR', '/tmp'))))
+        pid_file = base / 'novareader_search.pid'
+        pid_file.write_text(str(os.getpid()))
+    except OSError:
+        pid_file = None
+
+    def _remove_pid():
+        try:
+            if pid_file:
+                pid_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+    app.aboutToQuit.connect(_remove_pid)
+
+    window = BookSearchWindow(config, None)
+    window.setWindowFlags(
+        Qt.WindowType.Window |
+        Qt.WindowType.WindowTitleHint |
+        Qt.WindowType.WindowSystemMenuHint |
+        Qt.WindowType.WindowMinimizeButtonHint |
+        Qt.WindowType.WindowCloseButtonHint)
+    window.show()
+    sys.exit(app.exec())
+
+
 def main():
-    # Режим "воркера" для скачивания голосов Piper — та же идея, что и
-    # --reader чуть ниже: в собранном виде нет системного Python, чтобы
-    # исполнить voice_download_worker.py как отдельный скрипт, поэтому
-    # piper_voices_widget.py запускает СЕБЯ ЖЕ (через _build_piper_worker_cmd)
-    # с этим флагом, а мы тут просто передаём управление и выходим —
-    # никакого QApplication/GUI для этого не создаём.
     if '--piper-worker' in sys.argv:
         idx = sys.argv.index('--piper-worker')
         worker_args = sys.argv[idx + 1:]
@@ -1132,7 +1330,9 @@ def main():
         import voice_download_worker
         voice_download_worker.main()
         return
-
+    if '--search' in sys.argv:
+        _run_search_mode()
+        return
     if '--reader' in sys.argv:
         idx = sys.argv.index('--reader')
         if idx + 1 < len(sys.argv):
@@ -1141,8 +1341,6 @@ def main():
             print("Использование: NovaReader --reader <book_path>")
             sys.exit(1)
     elif len(sys.argv) > 1 and not sys.argv[1].startswith('--'):
-        # Запуск через ассоциацию файлов: NovaReader book.epub
-        # Открываем напрямую читалку — без загрузки библиотеки
         _run_reader_mode(sys.argv[1], from_association=True)
     else:
         app = EbookReader()

@@ -10,6 +10,20 @@ import json
 import traceback
 from pathlib import Path
 
+# ── SSL-сертификаты: тот же фикс, что и в main.py, но продублирован
+# здесь на случай, если воркер когда-нибудь запустят не через
+# main.py --piper-worker (тогда переменные окружения от main.py
+# не унаследуются). См main.py для подробного объяснения проблемы.
+try:
+    import certifi
+    _cacert_path = certifi.where()
+    if Path(_cacert_path).exists():
+        import os
+        os.environ.setdefault('SSL_CERT_FILE', _cacert_path)
+        os.environ.setdefault('REQUESTS_CA_BUNDLE', _cacert_path)
+except Exception:
+    pass
+
 
 def emit_event(event_type: str, data: dict):
     """Выводит событие в stdout. flush=True гарантирует мгновенную отправку."""

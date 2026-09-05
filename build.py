@@ -11,6 +11,21 @@ NovaReader – скрипт сборки через Nuitka (двойной ре�
     python3 build.py --no-strip         # не запускать strip (оставить отладочные символы)
     python3 build.py --no-cleanup       # не удалять мусор (numpy тесты, Qt локали и т.д.)
     python3 build.py --mingw64
+    python3 build.py --docker           # сборка в Docker для обратной совместимости
+                                          # с glibc (см. docker/Dockerfile.glibc239)
+    python3 build.py --target linux --appimage        # + упаковать в AppImage
+    python3 build.py --target linux --flatpak         # + упаковать в Flatpak
+    python3 build.py --target linux --flatpak --flatpak-install  # + сразу установить
+
+    # Сборка И упаковка ОДНОЙ командой, целиком внутри Docker (важно!):
+    # --appimage/--flatpak, переданные ВМЕСТЕ с --docker, выполняются
+    # тоже внутри контейнера — так package-build.sh ищет недостающие
+    # библиотеки в /usr/lib контейнера (glibc 2.39), а не хоста. Если
+    # собрать в Docker, а упаковать ОТДЕЛЬНО потом на хосте с более новым
+    # glibc (например Arch) — в AppImage может незаметно просочиться
+    # зависимость от glibc хоста, сводя на нет смысл сборки в контейнере.
+    python3 build.py --docker --appimage --clean
+    python3 build.py --docker --flatpak --flatpak-install --clean
 
 Результат:
     dist/NovaReader/
@@ -66,7 +81,7 @@ EXCLUDES = [
 BUILD_DEPS = ["nuitka", "ordered-set", "zstandard", "ziglang"]
 # patchelf нужен на Linux: Nuitka требует 0.17.2, но в Arch уже 0.18+.
 # Pip-версия фиксирована (0.17.2.x) и всегда совместима с Nuitka.
-BUILD_DEPS_LINUX = ["patchelf==0.17.2.2"]
+BUILD_DEPS_LINUX = ["patchelf==0.17.2"]
 
 # Зависимости приложения (минимальный набор)
 # PyQt6, PyQt6-WebEngine — GUI
@@ -135,6 +150,22 @@ def setup_venv(root: Path, explicit_python: str | None = None) -> Path:
             capture_output=True, text=True)
         info(f"Python версия: {r.stdout.strip()}")
         subprocess.run([str(sys_python), "-m", "venv", str(venv_path)], check=True)
+        # На некоторых сборках python3-venv (замечено в Docker на Ubuntu)
+        # generic-симлинк bin/python3 внутри venv не создаётся — venv module
+        # завершается с кодом 0, но реально существует только версионный
+        # bin/python3.X. Ищем его как фолбэк, иначе ниже упадёт с
+        # FileNotFoundError на несуществующий bin/python3.
+        if not venv_python.exists():
+            bin_dir = venv_path / ("Scripts" if is_win else "bin")
+            pattern = "python3.*.exe" if is_win else "python3.*"
+            candidates = sorted(bin_dir.glob(pattern))
+            # Отфильтровываем *-config и подобные не-исполняемые скрипты
+            candidates = [c for c in candidates if c.is_file() and os.access(c, os.X_OK)]
+            if candidates:
+                venv_python = candidates[0]
+                info(f"bin/python3 не создан venv-модулем — использую {venv_python.name}")
+            else:
+                error(f"venv создан, но ни один python-исполняемый файл не найден в {bin_dir}")
         info(f"venv создан: {venv_path}")
     else:
         step("Виртуальное окружение уже существует")
@@ -192,19 +223,54 @@ def install_dependencies(venv_python: Path, root: Path):
     info("Зависимости сборки установлены")
 
     # Linux: устанавливаем patchelf из pip с фиксированной версией.
-    # В Arch уже patchelf 0.18+, но Nuitka собрана под 0.17.2.
-    # pip-версия кладётся в venv/bin/patchelf и получает приоритет
-    # через PATH при запуске сборки (см. _get_build_env).
+    # Nuitka рассчитана на patchelf 0.17.2 — но версия из apt/pacman
+    # СИЛЬНО зависит от дистрибутива и НИКОГДА ей не совпадает:
+    #   Ubuntu 22.04 (apt): 0.14.3 — старая, ломает RPATH standalone-сборки
+    #     (бинарник собирается без ошибок, но не находит собственные .so/
+    #     ресурсы при запуске — выглядит как "программа не запускается",
+    #     хотя дело не в GCC/компиляторе, а именно в этом инструменте)
+    #   Ubuntu 24.04 (apt): 0.18.0 — новее, для этой раскладки обычно
+    #     работает терпимо, но тоже не тот же 0.17.2, что ждёт Nuitka
+    #   Arch (pacman): 0.18+ — тоже не совпадает
+    # Раньше здесь был только warn() при неудаче pip-установки — сборка
+    # молча продолжалась на системном patchelf, и ошибка (сломанные пути)
+    # проявлялась только при ЗАПУСКЕ готового бинарника, а не при сборке,
+    # что сильно затрудняло диагностику. Теперь версия проверяется по
+    # факту (через тот же venv/bin-приоритет, что использует сама Nuitka),
+    # и при несовпадении сборка останавливается сразу же.
     if sys.platform != "win32":
         run("Установка pip-версии patchelf (Linux)...")
         result = subprocess.run(
             [*pip, "install", *BUILD_DEPS_LINUX],
             capture_output=True, text=True)
-        if result.returncode == 0:
-            info("patchelf из pip установлен (приоритет над системным)")
-        else:
-            warn(f"pip patchelf не установлен: {result.stderr.strip()[:100]}")
-            warn("Будет использован системный patchelf — возможны ошибки на Arch")
+        if result.returncode != 0:
+            error(f"Не удалось установить pip-версию patchelf: "
+                  f"{result.stderr.strip()[:300]}\n"
+                  f"Без неё сборка на системном patchelf может дать "
+                  f"бинарник, который собирается без ошибок, но не "
+                  f"находит свои файлы при запуске.")
+
+        expected_version = BUILD_DEPS_LINUX[0].split("==")[1]
+        check_env = _get_build_env(venv_python)
+        try:
+            ver_result = subprocess.run(
+                ["patchelf", "--version"],
+                capture_output=True, text=True, env=check_env, timeout=10)
+            actual_version = ver_result.stdout.strip().split()[-1] if ver_result.stdout.strip() else "?"
+        except Exception as e:
+            actual_version = f"ошибка проверки: {e}"
+
+        if actual_version != expected_version:
+            error(
+                f"patchelf в PATH — версия {actual_version}, а не "
+                f"{expected_version} (venv/bin должен был перекрыть "
+                f"системный через PATH — см. _get_build_env). Это "
+                f"типичная причина, когда сборка проходит без ошибок, но "
+                f"готовый бинарник потом не находит собственные .so-файлы "
+                f"и не запускается — версия patchelf, отличная от "
+                f"{expected_version}, может неверно прописать RPATH."
+            )
+        info(f"patchelf {actual_version} — версия подтверждена, приоритет над системным есть")
 
 
 # ─── Сборка Nuitka ────────────────────────────────────────────────────────────
@@ -298,7 +364,7 @@ CLEANUP_PATTERNS = [
     'PyQt6/Qt6/resources/qtwebengine_devtools_resources.pak',
 ]
 
-# Паттерны переводов которые ОСТАВЛЯЕМ (ru + en)
+# Паттерны переводов которые ОСТАВЛЯЕМ — ru + en
 # Переводы которые ОСТАВЛЯЕМ — только ru и en нужных модулей
 KEEP_TRANSLATIONS = (
     'qt_ru', 'qt_en',
@@ -458,6 +524,24 @@ def run_upx(exe_dir: Path, args=None):
     targets += [f for f in exe_dir.rglob('*.so.*') if f.is_file()]
     targets += [f for f in exe_dir.rglob('*.dll') if f.is_file()]
     targets += [f for f in exe_dir.rglob('*.pyd') if f.is_file()]
+
+    # BLAS/LAPACK-реализации (OpenBLAS, MKL, ATLAS — тянутся numpy/scipy)
+    # используют нестандартное, чувствительное к выравниванию расположение
+    # ELF-сегментов (под производительность). UPX их успешно "сжимает"
+    # (exit code 0, без предупреждений), но ломает выравнивание — при
+    # запуске падает ImportError: "ELF load command address/offset not
+    # page-aligned". Известная, задокументированная несовместимость UPX
+    # именно с такими библиотеками — исключаем их из сжатия целиком.
+    UPX_EXCLUDE_PATTERNS = ('openblas', 'scipy_openblas', 'mkl_', 'libmkl',
+                            'lapack', 'libatlas', 'libblas')
+    excluded = [f for f in targets
+                if any(pat in f.name.lower() for pat in UPX_EXCLUDE_PATTERNS)]
+    if excluded:
+        targets = [f for f in targets if f not in excluded]
+        info(f"UPX: пропущено {len(excluded)} BLAS/LAPACK-библиотек "
+             f"(известная несовместимость с UPX — ломает ELF-выравнивание):")
+        for f in excluded:
+            info(f"  • {f.name}")
 
     # QtWebEngineCore — огромный файл (~197 МБ), сжимаем первым с увеличенным таймаутом
     # На Windows Qt6WebEngineCore.dll защищён CFG — UPX его сломает, пропускаем.
@@ -730,6 +814,17 @@ def build_nuitka(venv_python: Path, root: Path, dist_dir: Path, args=None):
         _fb2c_args = []
         warn(f"fb2c не найден: {_fb2c_bin} — конвертация FB2→EPUB недоступна")
 
+    # Nuitka на Anaconda/conda по умолчанию требует статическую libpython
+    # (libpython-static из conda-forge), которая в conda-окружениях обычно
+    # не установлена ("FATAL: Automatic detection of static libpython
+    # failed"). Раз мы теперь умеем собирать прямо из активной conda-среды
+    # (см. detect в main()), не требуем от пользователя дополнительно
+    # ставить conda-forge пакет - просто просим Nuitka линковаться
+    # динамически. Разделяемая libpython всё равно копируется в дистрибутив
+    # отдельно (см. _copy_libpython ниже), так что на портативность сборки
+    # это не влияет.
+    _static_libpython_args = ["--static-libpython=no"] if os.environ.get("CONDA_PREFIX") else []
+
     # Базовые флаги Nuitka
     cmd = [
         str(venv_python), "-m", "nuitka",
@@ -737,6 +832,7 @@ def build_nuitka(venv_python: Path, root: Path, dist_dir: Path, args=None):
         f"--output-dir={dist_dir}",
         f"--output-filename={out_name}",
         "--assume-yes-for-downloads",          # авто-скачать gcc/MinGW если нужно
+        *_static_libpython_args,
 
         # GUI-приложение: на Windows без консоли
         # --windows-console-mode=disable — актуальный флаг (Nuitka >= 1.9 / 4.x)
@@ -758,7 +854,7 @@ def build_nuitka(venv_python: Path, root: Path, dist_dir: Path, args=None):
     # ─── Настройка компилятора ───────────────────────────────────────────────
     #
     # Windows (нативная): Zig в корне проекта → Zig в PATH → MinGW64 → авто
-    # Linux (нативная):   Zig в корне проекта → системный gcc/cc
+    # Linux (нативная):   системный gcc/cc → Zig (запасной вариант)
     # Кросс-компиляция Linux→Windows: не поддерживается
 
     if target_win and host_platform != "win32":
@@ -773,18 +869,25 @@ def build_nuitka(venv_python: Path, root: Path, dist_dir: Path, args=None):
         info("Компилятор Windows: Nuitka использует Zig автоматически")
 
     else:
-        # Linux: Zig (если есть в корне) → системный gcc
-        zig = find_zig_compiler(root)
-        if zig:
-            os.environ.setdefault("CC",  f"{zig} cc")
-            os.environ.setdefault("CXX", f"{zig} c++")
-            info(f"Компилятор Linux: Zig ({zig})")
+        # Linux: системный gcc в приоритете → Zig только как запасной вариант.
+        # Раньше было наоборот (Zig первым) — но Nuitka не всегда корректно
+        # находит/использует Zig как C-компилятор на некоторых системах,
+        # из-за чего сборка либо падает, либо использует что-то не то.
+        # gcc почти всегда уже стоит на Linux (build-essential) и не даёт
+        # сюрпризов, поэтому теперь он в приоритете.
+        gcc = shutil.which("gcc") or shutil.which("cc")
+        if gcc:
+            os.environ.setdefault("CC", gcc)
+            os.environ.setdefault("CXX", shutil.which("g++") or shutil.which("c++") or gcc)
+            info(f"Компилятор Linux: {gcc}")
         else:
-            gcc = shutil.which("gcc") or shutil.which("cc")
-            if gcc:
-                info(f"Компилятор Linux: {gcc}")
+            zig = find_zig_compiler(root)
+            if zig:
+                os.environ.setdefault("CC",  f"{zig} cc")
+                os.environ.setdefault("CXX", f"{zig} c++")
+                info(f"gcc/cc не найден — использую Zig ({zig})")
             else:
-                error("gcc/cc не найден. Установите: sudo apt install build-essential")
+                error("Ни gcc/cc, ни Zig не найдены. Установите: sudo apt install build-essential")
 
     # PyQt6 + WebEngine
     cmd.append("--enable-plugin=pyqt6")
@@ -819,25 +922,60 @@ def build_nuitka(venv_python: Path, root: Path, dist_dir: Path, args=None):
         "--include-module=tts_correction_window",
         "--include-module=piper_voice_downloader",
         "--include-module=piper_voices_widget",
-        "--include-module=graphics_backend",
         "--include-module=audio_player",
         "--include-module=screen_inhibit",
         "--include-module=cloud_download",
          "--include-module=voice_download_worker",
          "--include-module=book_search_window",
+          "--include-module=translator_engine",
+           "--include-module=translator_window",
+            "--include-module=process_monitor",
         # PyQt6.QtDBus нужен для screen_inhibit (кофеин-режим) на Linux
         *(["--include-module=PyQt6.QtDBus"] if sys.platform != "win32" else []),
         # Сетевые пакеты (edge-tts + requests)
         "--include-package=edge_tts",
         "--include-package=requests",
-        # certifi и charset_normalizer подтягиваются через requests автоматически
+        "--include-package=certifi",
+        # cacert.pem — файл ДАННЫХ (не .py), --include-package его не
+        # гарантирует; без него requests не может проверить TLS-сертификат
+        # на Windows (там нет системного CA bundle как fallback на Linux),
+        # и любая HTTPS-загрузка (голоса Piper, облачные книги) молча
+        # падает с CERTIFICATE_VERIFY_FAILED. См. main.py/voice_download_worker.py.
+        "--include-package-data=certifi",
+        # charset_normalizer подтягивается через requests автоматически
         
         # Аудио
         "--include-package=sounddevice",
         "--include-package=numpy",
         # aiohttp и его зависимости (yarl, frozenlist, multidict и др.)
         # подтягиваются автоматически через edge_tts — не дублируем
+        
+        # Пакеты для морфологического анализа (исправлено!)
+        "--include-package=pymorphy3",
+        "--include-package=pymorphy3_dicts_ru",  # правильное имя (с дефисом)
     ])
+
+    # ─── Добавляем data-директорию словарей pymorphy3 (обязательно!) ──────
+    # Словари лежат в site-packages/pymorphy3_dicts_ru/data
+    # Используем venv_python для поиска правильного пути
+    import site
+    venv_site_packages = Path(venv_python).parent.parent / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    # Проверяем, есть ли там папка pymorphy3_dicts_ru
+    data_src = venv_site_packages / "pymorphy3_dicts_ru" / "data"
+    if not data_src.exists():
+        # Запасной вариант – через site.getsitepackages()
+        for sp in site.getsitepackages():
+            candidate = Path(sp) / "pymorphy3_dicts_ru" / "data"
+            if candidate.exists():
+                data_src = candidate
+                break
+    if data_src.exists():
+        cmd.append(f"--include-data-dir={data_src}=pymorphy3_dicts_ru/data")
+        info(f"Словари pymorphy3 включены из: {data_src}")
+    else:
+        warn("Папка с данными pymorphy3 не найдена — морфологический разбор не будет работать")
+        warn(f"Искали в: {venv_site_packages / 'pymorphy3_dicts_ru/data'}")
+    # ─────────────────────────────────────────────────────────────────────────
 
     # Исключения — не следовать за импортами ненужных модулей
     for excl in EXCLUDES:
@@ -998,10 +1136,6 @@ def create_linux_launcher(exe_dir: Path):
         f'export QTWEBENGINE_RESOURCES_PATH="{resources_path}"\n'
         f'export QTWEBENGINE_LOCALES_PATH="{locales_path}"\n'
         "\n"
-        "# Флаги памяти WebEngine — устанавливаем здесь т.к. main.py использует setdefault\n"
-        "# (setdefault не перезапишет переменную если она уже задана лаунчером)\n"
-        'export QTWEBENGINE_CHROMIUM_FLAGS="--use-gl=egl --disable-gpu-compositing --js-flags=--max-old-space-size=192 --renderer-process-limit=1 --disable-background-networking --disable-dev-shm-usage --disk-cache-size=1 --media-cache-size=1 --disable-gpu-rasterization --blink-settings=maximumDecodedImageSize=33554432 --disable-features=Prefetch,PreloadMediaEngagementData"\n'
-        "\n"
         'exec "$EXE" "$@"\n'
     )
     launcher.write_text(script, encoding="utf-8")
@@ -1016,14 +1150,9 @@ def create_windows_launcher(exe_dir: Path):
     script = (
         "@echo off\n"
         f"REM {APP_NAME} launcher for Windows\n"
-        "REM Оптимизация Qt WebEngine: используем DirectX 11 через ANGLE\n"
         "\n"
         'set SCRIPT_DIR=%~dp0\n'
         f'set EXE=%SCRIPT_DIR%{APP_NAME}.exe\n'
-        "\n"
-        "REM Флаги памяти WebEngine\n"
-        'set QTWEBENGINE_CHROMIUM_FLAGS=--use-gl=angle --use-angle=d3d11 --js-flags=--max-old-space-size=192 --renderer-process-limit=1 --disable-background-networking --disable-dev-shm-usage --disk-cache-size=1 --media-cache-size=1 --disable-gpu-rasterization --blink-settings=maximumDecodedImageSize=33554432 --disable-features=Prefetch,PreloadMediaEngagementData\n'
-        'set ANGLE_FEATURE_OVERRIDES_ENABLED=force_d3d11\n'
         "\n"
         'start "" "%EXE%" %*\n'
     )
@@ -1058,6 +1187,24 @@ def post_process(root: Path, dist_dir: Path,
     if not exe_dir:
         exe_dir = dist_dir
     run(f"Папка с exe: {exe_dir}")
+
+    # Nuitka называет папку по имени входного скрипта (dist/main.dist), а не
+    # по имени программы — скрипты упаковки (package-build.sh, Flatpak-
+    # манифест) ищут её строго как dist/<APP_NAME> (например dist/NovaReader).
+    # Переименовываем/переносим сюда сразу же, чтобы не делать это руками
+    # перед каждой упаковкой.
+    target_dir = dist_dir / APP_NAME
+    if exe_dir.resolve() == dist_dir.resolve():
+        # Nuitka положила файлы прямо в dist_dir (без своей подпапки) —
+        # переместить саму dist_dir в себя же нельзя, просто оставляем как
+        # есть в этом редком случае (обычно Nuitka всегда создаёт <name>.dist).
+        pass
+    elif exe_dir.resolve() != target_dir.resolve():
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        shutil.move(str(exe_dir), str(target_dir))
+        exe_dir = target_dir
+        run(f"Папка переименована в: {exe_dir}")
 
     # web/ и fonts/ будут скопированы ниже
 
@@ -1103,6 +1250,18 @@ def post_process(root: Path, dist_dir: Path,
             shutil.copytree(str(src), str(dst))
             file_count = sum(1 for _ in dst.rglob('*') if _.is_file())
             info(f"tts/piper/ скопирована ({file_count} файлов) → {exe_dir.name}/tts/piper/")
+            # Явный chmod +x — исходный бит исполняемости мог быть уже
+            # потерян ДО этого шага (например, при упаковке/распаковке
+            # через zip, который не всегда сохраняет unix-права). Делаем
+            # это здесь, а не полагаемся только на самолечение в
+            # tts/clients/piper.py — там chmod падает молча, если бинарник
+            # окажется на файловой системе только для чтения (AppImage).
+            piper_bin = dst / 'piper'
+            if piper_bin.exists():
+                piper_bin.chmod(piper_bin.stat().st_mode | 0o111)
+                info(f"tts/piper/piper: chmod +x применён")
+            else:
+                warn("tts/piper/piper не найден внутри скопированной папки — TTS через Piper не будет работать")
         else:
             warn("Папка tts/piper/ не найдена, пропускаем")
     else:
@@ -1192,6 +1351,218 @@ def print_summary(exe_dir: Path):
 
 # ─── Главная функция ──────────────────────────────────────────────────────────
 
+# ─── Сборка внутри Docker (обратная совместимость с glibc) ──────────────────
+
+def _run_docker_build(args):
+    """Собирает проект внутри Docker-контейнера со старым glibc, чтобы
+    итоговый бинарник запускался на системах старее сборочной машины.
+
+    Nuitka линкует результат против glibc ТОЙ машины, где идёт сборка —
+    это свойство динамической линковки Linux, а не параметр build.py.
+    Единственный надёжный способ получить бинарник, совместимый со старым
+    glibc (в этом проекте — 2.39, Ubuntu 24.04), — собрать его внутри
+    окружения, где установлена именно эта версия (тот же принцип, что
+    manylinux-образы для Python-пакетов)."""
+    if sys.platform == "win32":
+        error("--docker актуален только для Linux-сборки (glibc — Linux-специфика)")
+
+    docker_bin = shutil.which("docker")
+    if not docker_bin:
+        error("Docker не найден в PATH. Установите Docker: https://docs.docker.com/engine/install/")
+
+    root = Path(__file__).parent.resolve()
+    dockerfile = root / "docker" / "Dockerfile.glibc239"
+    if not dockerfile.exists():
+        error(f"Не найден {dockerfile}")
+
+    image_tag = "novareader-build:glibc239"
+    if args.docker_python:
+        image_tag += f"-py{args.docker_python.replace('.', '')}"
+
+    build_args = []
+    if args.docker_python:
+        build_args = ["--build-arg", f"PYTHON_VERSION={args.docker_python}"]
+
+    step(f"Сборка Docker-образа (glibc 2.39"
+         f"{f', Python {args.docker_python}' if args.docker_python else ''}) — "
+         f"это может занять пару минут при первом запуске")
+    run(f"docker build -f {dockerfile.relative_to(root)} "
+        f"{' '.join(build_args)} -t {image_tag} .")
+    r = subprocess.run(
+        [docker_bin, "build", "-f", str(dockerfile), *build_args, "-t", image_tag, str(root)],
+    )
+    if r.returncode != 0:
+        error("Сборка Docker-образа не удалась (см. вывод выше)")
+    info(f"Образ готов: {image_tag}")
+
+    # Прокидываем дальше все флаги, кроме --docker/--docker-python (иначе
+    # рекурсия или неизвестный build.py-внутри-контейнера флаг) — то есть
+    # --clean, --target, --no-strip и т.п. работают и через --docker.
+    passthrough = []
+    skip_next = False
+    raw_args = sys.argv[1:]
+    for i, a in enumerate(raw_args):
+        if skip_next:
+            skip_next = False
+            continue
+        if a == "--docker":
+            continue
+        if a == "--docker-python":
+            skip_next = True  # пропускаем и сам флаг, и его значение
+            continue
+        if a.startswith("--docker-python="):
+            continue
+        passthrough.append(a)
+
+    step(f"Запуск сборки внутри контейнера ({image_tag})")
+
+    # ─── ЗАПУСК С ФЛАГОМ --user ──────────────────────────────────────────────
+    # Важно: все файлы, создаваемые внутри контейнера (dist/, build/,
+    # .venv-build/ и прочие), должны принадлежать пользователю хоста,
+    # а не root. Иначе после сборки их нельзя будет удалить/перезаписать
+    # без sudo, что крайне неудобно.
+    #
+    # user_id = os.getuid() — UID текущего пользователя на хосте.
+    # Docker пробрасывает его внутрь контейнера через --user, и все
+    # процессы внутри (включая Nuitka) будут создавать файлы с этим UID.
+    # Это работает даже если в контейнере нет такого пользователя в
+    # /etc/passwd — Docker просто подменяет UID на уровне ядра.
+    user_id = os.getuid()
+    run(f"Запуск с --user {user_id} (файлы будут принадлежать текущему пользователю)")
+
+    r = subprocess.run([
+        docker_bin, "run", "--rm",
+        "-u", str(user_id),  # ⬅️ КЛЮЧЕВОЙ ФЛАГ
+        "-v", f"{root}:/build",
+        image_tag,
+        *(passthrough or ["--target", "linux"]),
+    ])
+    if r.returncode != 0:
+        error("Сборка внутри контейнера завершилась с ошибкой (см. вывод выше)")
+
+    print()
+    info(f"Готово — бинарник совместим с glibc 2.39+ (см. {DIST_DIR}/)")
+    print(f"  {yellow('Проверить минимальную версию glibc итогового бинарника:')}")
+    print(f"    objdump -T {DIST_DIR}/{APP_NAME}/{APP_NAME} | grep GLIBC_ | sed 's/.*GLIBC_//' | sort -V | tail -1")
+    print()
+
+
+# ─── AppImage ────────────────────────────────────────────────────────────
+
+def _warn_if_packaging_outside_docker(dist_dir: Path):
+    """Если упаковка (AppImage/Flatpak) идёт НЕ внутри Docker-контейнера
+    (см. ENV NOVAREADER_IN_DOCKER=1 в Dockerfile.glibc239) — предупреждаем.
+
+    package-build.sh при нехватке какой-то библиотеки в dist/NovaReader
+    ищёт её в /usr/lib ТОЙ машины, где сейчас реально выполняется. Если
+    сама программа собрана внутри Docker (glibc 2.39), а упаковка в
+    AppImage/Flatpak запущена ОТДЕЛЬНО на хосте с более новым glibc
+    (например, на Arch с 2.43) — скрипт найдёт и подложит библиотеки
+    хоста, и в итоговый пакет незаметно просочится зависимость от более
+    новой glibc, сводя на нет весь смысл сборки в контейнере.
+
+    Для чисто нативной сборки (без --docker вообще, всё на одной машине)
+    предупреждение ложное — там glibc хоста и так один и тот же на всех
+    этапах, поэтому это просто info(), а не warn()."""
+    if os.environ.get("NOVAREADER_IN_DOCKER") == "1":
+        return  # упаковка идёт внутри контейнера — всё безопасно, тихо продолжаем
+    info("Упаковка идёт вне Docker. Если dist/NovaReader собрана через "
+         "--docker, а упаковываете вы сейчас на ДРУГОЙ (хостовой) машине — "
+         "лучше передать --appimage/--flatpak ВМЕСТЕ с --docker в одной "
+         "команде, иначе package-build.sh может подложить библиотеки "
+         "хоста и протащить в пакет более новую glibc хоста.")
+
+
+def _run_appimage_packaging(root: Path, dist_dir: Path):
+    """Упаковывает уже собранный dist/NovaReader в AppImage — запускает
+    package-build.sh (см. этот файл в корне проекта). Скрипт сам проверяет
+    наличие dist/NovaReader, докачивает appimagetool при первом запуске,
+    подхватывает Qt-плагины/ресурсы и упаковывает результат в
+    NovaReader-<дата>.AppImage в корне проекта."""
+    script = root / "package-build.sh"
+    if not script.exists():
+        warn(f"--appimage пропущен: не найден {script}")
+        return
+    if not (dist_dir / APP_NAME).exists():
+        warn(f"--appimage пропущен: не найдена сборка {dist_dir / APP_NAME}")
+        return
+    if shutil.which("bash") is None:
+        warn("--appimage пропущен: bash не найден в PATH")
+        return
+
+    _warn_if_packaging_outside_docker(dist_dir)
+
+    step("AppImage: упаковка через package-build.sh")
+    r = subprocess.run(["bash", str(script)], cwd=str(root))
+    if r.returncode != 0:
+        warn("package-build.sh завершился с ошибкой (см. вывод выше) — "
+             "AppImage не создан, но основная сборка в dist/ не пострадала")
+    else:
+        info("AppImage готов — см. NovaReader-*.AppImage в корне проекта")
+
+
+# ─── Flatpak ─────────────────────────────────────────────────────────────
+
+def _run_flatpak_packaging(root: Path, dist_dir: Path, install: bool = False):
+    """Упаковывает уже собранный dist/NovaReader в Flatpak по манифесту
+    flatpak/com.novareader.NovaReader.yml. Манифест не пересобирает
+    приложение из исходников — как и AppImage-скрипт, он берёт готовый
+    Nuitka-standalone dist/NovaReader и просто кладёт его файлы в песочницу
+    Flatpak (buildsystem: simple + cp). Это надёжнее, чем пытаться собрать
+    PyQt6-WebEngine из исходников силами flatpak-builder — там своя, более
+    сложная и хрупкая цепочка зависимостей."""
+    if shutil.which("flatpak-builder") is None:
+        warn("--flatpak пропущен: flatpak-builder не найден. Установите:\n"
+             "    sudo apt install flatpak-builder\n"
+             "    flatpak install flathub org.freedesktop.Platform//23.08 "
+             "org.freedesktop.Sdk//23.08")
+        return
+    if not (dist_dir / APP_NAME).exists():
+        warn(f"--flatpak пропущен: не найдена сборка {dist_dir / APP_NAME}")
+        return
+
+    _warn_if_packaging_outside_docker(dist_dir)
+
+    manifest = root / "flatpak" / "com.novareader.NovaReader.yml"
+    if not manifest.exists():
+        warn(f"--flatpak пропущен: не найден манифест {manifest}")
+        return
+
+    build_dir = root / "flatpak-build"
+    repo_dir = root / "flatpak-repo"
+
+    step("Flatpak: сборка через flatpak-builder")
+    cmd = [
+        "flatpak-builder", "--force-clean",
+        f"--repo={repo_dir}",
+        str(build_dir), str(manifest),
+    ]
+    r = subprocess.run(cmd, cwd=str(root))
+    if r.returncode != 0:
+        warn("flatpak-builder завершился с ошибкой (см. вывод выше) — "
+             "Flatpak не создан, но основная сборка в dist/ не пострадала")
+        return
+    info(f"Flatpak-репозиторий готов: {repo_dir}")
+
+    if install:
+        step("Flatpak: локальная установка (--user)")
+        r = subprocess.run(
+            ["flatpak-builder", "--user", "--install", "--force-clean",
+             str(build_dir), str(manifest)],
+            cwd=str(root),
+        )
+        if r.returncode != 0:
+            warn("Установка Flatpak не удалась (см. вывод выше)")
+        else:
+            info("Flatpak установлен — запуск: flatpak run com.novareader.NovaReader")
+    else:
+        print(f"  {yellow('Собрать .flatpak-пакет для распространения:')}")
+        print(f"    flatpak build-bundle {repo_dir} NovaReader.flatpak "
+              f"com.novareader.NovaReader")
+        print(f"  {yellow('Или установить локально сразу же в следующий раз:')}")
+        print(f"    python3 build.py --target linux --flatpak --flatpak-install")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=f"Сборка {APP_NAME} через Nuitka",
@@ -1212,7 +1583,32 @@ def main():
                         help="Не удалять мусор (Qt переводы, numpy тесты, WebEngine devtools)")
     parser.add_argument("--no-upx",      action="store_true",
                         help="Не сжимать UPX (по умолчанию UPX включен)")
+    parser.add_argument("--docker",      action="store_true",
+                        help="Собрать внутри Docker (Ubuntu 24.04, glibc 2.39) для "
+                             "обратной совместимости — см. docker/Dockerfile.glibc239. "
+                             "Без этого флага бинарник линкуется против glibc ХОСТА, "
+                             "на котором идёт сборка, и не запустится на системах "
+                             "со старым glibc.")
+    parser.add_argument("--docker-python", default=None, metavar="X.Y",
+                        help="Версия Python внутри --docker образа (например 3.14). "
+                             "Ставится из PPA deadsnakes, если её нет в стандартных "
+                             "репозиториях базового образа Ubuntu. По умолчанию — "
+                             "минимум, который требует build.py (3.10).")
+    parser.add_argument("--appimage",    action="store_true",
+                        help="После сборки упаковать dist/NovaReader в AppImage "
+                             "(запускает package-build.sh; только Linux).")
+    parser.add_argument("--flatpak",     action="store_true",
+                        help="После сборки упаковать dist/NovaReader в Flatpak "
+                             "(запускает flatpak-builder по манифесту "
+                             "flatpak/com.novareader.NovaReader.yml; только Linux).")
+    parser.add_argument("--flatpak-install", action="store_true",
+                        help="С --flatpak: сразу установить собранный Flatpak "
+                             "локально (--user), не только собрать .flatpak-repo.")
     args = parser.parse_args()
+
+    if args.docker:
+        _run_docker_build(args)
+        return
 
     # Устанавливаем целевую платформу
     global TARGET_PLATFORM
@@ -1268,18 +1664,39 @@ def main():
 
 
     # venv
-    # Если уже запущены внутри venv — не создаём новый, используем текущий
+    # Если уже запущены внутри venv или conda-окружения — не создаём новый,
+    # используем текущий. conda не ставит VIRTUAL_ENV и не меняет
+    # sys.base_prefix/sys.prefix (каждое conda-окружение - полноценная
+    # отдельная установка Python, а не надстройка над базовым
+    # интерпретатором, как обычный venv) - поэтому проверяем отдельно
+    # через CONDA_PREFIX, который conda всегда выставляет при активации
+    # любого окружения, включая base.
+    #
+    # Без этой проверки скрипт считал, что окружения нет, и создавал venv
+    # через find_python() -> shutil.which(), который при активной conda
+    # находит именно conda-питон (она подставляет себя первой в PATH).
+    # venv, созданный ОТ conda-питона, обычно нерабочий: он линкуется на
+    # библиотеки (libpython3.x.so, openssl, libffi), которые физически
+    # лежат внутри conda-окружения, а обычная активация venv не
+    # воспроизводит трюки с путями, которые делает conda при своей
+    # активации.
+    in_conda_env = os.environ.get("CONDA_PREFIX") is not None
     already_in_venv = (
         os.environ.get("VIRTUAL_ENV") is not None or
         hasattr(sys, "real_prefix") or
-        (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix)
+        (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix) or
+        in_conda_env
     )
 
     if args.no_venv or already_in_venv:
         venv_python = Path(args.python) if args.python else Path(sys.executable)
         if already_in_venv and not args.no_venv:
-            venv_name = Path(os.environ.get("VIRTUAL_ENV", sys.prefix)).name
-            info(f"Обнаружен активный venv: {venv_name}")
+            if in_conda_env:
+                env_name = os.environ.get("CONDA_DEFAULT_ENV", "base")
+                info(f"Обнаружено активное conda-окружение: {env_name}")
+            else:
+                venv_name = Path(os.environ.get("VIRTUAL_ENV", sys.prefix)).name
+                info(f"Обнаружен активный venv: {venv_name}")
         info(f"Используем Python: {venv_python} ({sys.version.split()[0]})")
     else:
         venv_python = setup_venv(root, explicit_python=args.python)
@@ -1311,6 +1728,22 @@ def main():
 
     # Итог
     print_summary(exe_dir)
+
+    # ─── Опциональная упаковка (только Linux) ──────────────────────────
+    target_is_linux = (TARGET_PLATFORM == "linux") or \
+                       (TARGET_PLATFORM is None and platform.system() != "Windows")
+
+    if args.appimage:
+        if not target_is_linux:
+            warn("--appimage пропущен: доступен только для Linux-сборки")
+        else:
+            _run_appimage_packaging(root, dist_dir)
+
+    if args.flatpak:
+        if not target_is_linux:
+            warn("--flatpak пропущен: доступен только для Linux-сборки")
+        else:
+            _run_flatpak_packaging(root, dist_dir, install=args.flatpak_install)
 
 
 if __name__ == "__main__":

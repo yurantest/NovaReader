@@ -1,4 +1,6 @@
+# config.py
 import json
+import sys
 import hashlib
 import uuid
 import os
@@ -80,6 +82,8 @@ class Config:
         self.notes_file = self.config_dir / 'notes.json'
         self.bookmarks_file  = self.config_dir / 'bookmarks.json'
         self.corrections_file = self.config_dir / 'corrections.json'
+        # Пользовательские шаблоны TTS-подсветки — отдельный файл
+        self.custom_overlay_file = self.config_dir / 'customTTSColor.json'
 
         # Директория для голосов
         self.voices_dir = self.config_dir / 'voices'
@@ -118,12 +122,27 @@ class Config:
 
     @staticmethod
     def _normalize_path(path) -> str:
-        """Приводит путь к единому формату: прямые слеши / (POSIX-стиль)"""
-        return str(path).replace('\\', '/')
+        """Приводит путь к единому формату: прямые слеши / (POSIX-стиль).
+
+        На Windows файловая система регистронезависима (C:\\Book.epub и
+        c:\\book.epub — один и тот же файл), но как ключ словаря/JSON
+        регистр важен. Если путь к одной и той же книге приходит с разным
+        регистром из разных мест (сканирование папки, диалог выбора файла,
+        конвертация FB2C, drag-n-drop) — прогресс чтения и статус
+        сохраняются под одним ключом, а список библиотеки при отрисовке и
+        сортировке ищет под другим и не находит: книга не поднимается в
+        начало списка и не показывает статус "читаю"/"прочитано" и процент.
+        Поэтому на Windows дополнительно приводим путь к нижнему регистру.
+        """
+        s = str(path).replace('\\', '/')
+        if sys.platform == 'win32':
+            s = s.lower()
+        return s
 
     # Ключи удалённые из программы — чистятся автоматически при загрузке
     _OBSOLETE_KEYS = {
         'reader_font_heading',
+        'tts_highlight_color',  # заменен на tts_highlight_color_hex
     }
 
     def _load(self) -> dict:
@@ -159,12 +178,14 @@ class Config:
             'library_path': str(Config._get_default_library_dir()),
             'first_run': True,
             'language': 'ru',
-            'language': 'ru',
             # Настройки подсветки по умолчанию
             'default_highlight_style': 'highlight',
             'default_highlight_color': 'blue',
             # Цвет TTS-подсветки по умолчанию
-            'tts_highlight_color': 'cyan',
+            'tts_highlight_color_hex': '#00CED1',
+            'tts_highlight_opacity': 0.7,
+            'active_tts_template': 'cyan',
+            'user_tts_templates': [],
         }
 
     # ══════════════════════════════════════════════════════════════════
@@ -189,6 +210,125 @@ class Config:
         создавая её при необходимости."""
         self.download_path.mkdir(parents=True, exist_ok=True)
         return self.download_path
+
+    # --- TTS-подсветка: кастомный цвет и прозрачность ---
+    def get_tts_highlight_color(self) -> str:
+        """Hex-цвет подсветки TTS (например '#00CED1'), настраиваемый пользователем."""
+        return self.get('tts_highlight_color_hex', '#00CED1')
+
+    def get_tts_highlight_opacity(self) -> float:
+        """Прозрачность подсветки TTS, 0.1–1.0."""
+        return float(self.get('tts_highlight_opacity', 0.7))
+
+    def set_tts_highlight_opacity(self, opacity: float):
+        opacity = max(0.1, min(1.0, float(opacity)))
+        self.set('tts_highlight_opacity', opacity)
+    # ----------------------------------------------------
+
+    # --- TTS-подсветка: шаблоны (готовые + пользовательские) -----------
+    # Готовые (встроенные) шаблоны — id, отображаемое имя, hex, прозрачность.
+    # id встроенных шаблонов всегда начинается без префикса 'user:'.
+    BUILTIN_TTS_TEMPLATES = [
+        {'id': 'cyan',   'name': 'Голубой (по умолчанию)', 'color': '#00CED1', 'opacity': 0.7},
+        {'id': 'red',    'name': 'Красный',                'color': '#f28b82', 'opacity': 0.7},
+        {'id': 'green',  'name': 'Зелёный',                 'color': '#81c995', 'opacity': 0.7},
+        {'id': 'yellow', 'name': 'Жёлтый',                  'color': '#fdd66b', 'opacity': 0.7},
+        {'id': 'pink',   'name': 'Розовый',                 'color': '#ff8b8b', 'opacity': 0.7},
+    ]
+
+    def _load_custom_overlay(self) -> list:
+        """Читает пользовательские шаблоны подсветки TTS из customTTSColor.json."""
+        if self.custom_overlay_file.exists():
+            try:
+                data = json.loads(self.custom_overlay_file.read_text(encoding='utf-8'))
+                if isinstance(data, list):
+                    return data
+            except Exception:
+                pass
+        return []
+
+    def _save_custom_overlay(self, templates: list):
+        """Записывает список пользовательских шаблонов в customTTSColor.json."""
+        try:
+            self.custom_overlay_file.write_text(
+                json.dumps(templates, ensure_ascii=False, indent=2), encoding='utf-8'
+            )
+        except Exception as e:
+            print(f"[Config] Ошибка сохранения customTTSColor.json: {e}")
+
+    def get_user_tts_templates(self) -> list:
+        """Список пользовательских шаблонов подсветки TTS (файл customTTSColor.json).
+        Каждый элемент: {'id': str, 'name': str, 'color': '#RRGGBB', 'opacity': float}
+        """
+        return self._load_custom_overlay()
+
+    def save_user_tts_template(self, name: str, color: str, opacity: float, template_id: str = None) -> dict:
+        """Сохраняет (создаёт или обновляет) пользовательский шаблон подсветки TTS
+        в customTTSColor.json. Возвращает сохранённый шаблон (с id)."""
+        templates = self.get_user_tts_templates()
+        opacity = max(0.1, min(1.0, float(opacity)))
+        if template_id:
+            # Обновление существующего шаблона
+            for t in templates:
+                if t.get('id') == template_id:
+                    t['name'] = name
+                    t['color'] = color
+                    t['opacity'] = opacity
+                    self._save_custom_overlay(templates)
+                    return t
+        # Новый шаблон
+        import uuid as _uuid
+        new_template = {
+            'id': f'user:{_uuid.uuid4().hex[:8]}',
+            'name': name,
+            'color': color,
+            'opacity': opacity,
+        }
+        templates.append(new_template)
+        self._save_custom_overlay(templates)
+        return new_template
+
+    def delete_user_tts_template(self, template_id: str):
+        """Удаляет пользовательский шаблон подсветки TTS по id из customTTSColor.json."""
+        templates = self.get_user_tts_templates()
+        templates = [t for t in templates if t.get('id') != template_id]
+        self._save_custom_overlay(templates)
+        # Если был активен удалённый шаблон — сбрасываем на встроенный по умолчанию
+        if self.get('active_tts_template', '') == template_id:
+            self.set('active_tts_template', 'cyan')
+
+    def get_all_tts_templates(self) -> list:
+        """Все доступные шаблоны: встроенные + пользовательские, в одном списке."""
+        return list(self.BUILTIN_TTS_TEMPLATES) + self.get_user_tts_templates()
+
+    def get_active_tts_template_id(self) -> str:
+        """id текущего активного шаблона подсветки TTS ('' если применён произвольный цвет
+        вручную и не сохранён как шаблон)."""
+        return self.get('active_tts_template', 'cyan')
+
+    def apply_tts_template(self, template_id: str) -> bool:
+        """Применяет шаблон (встроенный или пользовательский) как текущую
+        подсветку TTS: сохраняет его цвет/прозрачность как активные и
+        запоминает id как активный шаблон. Возвращает True при успехе."""
+        template = None
+        for t in self.get_all_tts_templates():
+            if t.get('id') == template_id:
+                template = t
+                break
+        if not template:
+            return False
+        # Устанавливаем цвет/прозрачность напрямую (без set_tts_highlight_color,
+        # который сбрасывает active_tts_template) и фиксируем активный шаблон последним.
+        self.set('tts_highlight_color_hex', template['color'])
+        self.set_tts_highlight_opacity(template['opacity'])
+        self.set('active_tts_template', template_id)
+        return True
+
+    def set_tts_highlight_color(self, hex_color: str):
+        self.set('tts_highlight_color_hex', hex_color)
+        # Ручной выбор цвета (не через шаблон) — активного шаблона больше нет
+        self.set('active_tts_template', '')
+    # ---------------------------------------------------------------
 
     def get_reader_fonts(self) -> List[str]:
         """Возвращает популярные системные шрифты подходящие для чтения."""
@@ -1565,6 +1705,7 @@ class Config:
             'config/notes.json':      self.notes_file,
             'config/bookmarks.json':   self.bookmarks_file,
             'config/corrections.json':  self.corrections_file,
+            'config/customTTSColor.json': self.custom_overlay_file,
         }
         for arc_name, src in config_files.items():
             if src.exists():
@@ -1671,6 +1812,7 @@ class Config:
             'config/notes.json':      self.notes_file,
             'config/bookmarks.json':  self.bookmarks_file,
             'config/corrections.json':  self.corrections_file,
+            'config/customTTSColor.json': self.custom_overlay_file,
             # обратная совместимость (старый формат без папки config/)
             'settings.json':   self.config_file,
             'library.json':    self.library_file,

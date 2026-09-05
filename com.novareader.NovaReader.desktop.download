@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=NovaReader
+Comment=Книжный ридер с TTS
+Exec=NovaReader
+Icon=com.novareader.NovaReader
+Terminal=false
+Type=Application
+Categories=Office;AudioVideo;
+StartupWMClass=NovaReader

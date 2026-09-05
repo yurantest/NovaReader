@@ -11,6 +11,7 @@ import base64
 import uuid
 from datetime import datetime
 import sys
+import os
 
 
 class ReaderBridge(QObject):
@@ -18,33 +19,31 @@ class ReaderBridge(QObject):
     piperProgress = pyqtSignal(str, int)
     piperFinished = pyqtSignal(str, bool)
     piperError = pyqtSignal(str, str)
+    chaptersExtracted = pyqtSignal(str)
+    wordTimingsReady = pyqtSignal(str)
+    ttsDurationReady = pyqtSignal(int)
 
     def __init__(self, reader):
         super().__init__()
         self.reader = reader
-        # Кешируем config — он никогда не меняется, но reader может стать None
         self._config = reader.config
         self.piperProgress.connect(self._on_piper_progress)
         self.piperFinished.connect(self._on_piper_finished)
         self.piperError.connect(self._on_piper_error)
+        self.wordTimingsReady.connect(self._on_word_timings)
+        self.ttsDurationReady.connect(self._on_tts_duration)
 
-    # ── Безопасные аксессоры ─────────────────────────────────────────────
-    # closeEvent обнуляет self.reader чтобы оборвать все callbacks.
-    # Любой JS-callback может прилететь чуть позже — guard это перехватывает.
     @property
     def _r(self):
-        """Возвращает reader или None если окно уже закрывается."""
         return self.reader
 
     @property
     def _tts(self):
-        """Возвращает tts_controller или None если окно уже закрывается."""
         r = self.reader
         return r.tts_controller if r is not None else None
 
     @property
     def _web(self):
-        """Возвращает QWebEnginePage или None если окно уже закрывается."""
         r = self.reader
         if r is None:
             return None
@@ -65,6 +64,20 @@ class ReaderBridge(QObject):
     def _on_piper_error(self, vid, err):
         self._run_js(f"window.onPiperVoiceError&&window.onPiperVoiceError({json.dumps(vid)},{json.dumps(err)})")
 
+    def _on_word_timings(self, timings_json: str):
+        self._run_js(f"window._ttsWordTimings && window._ttsWordTimings({timings_json});")
+
+    def _on_tts_duration(self, ms: int):
+        self._run_js(f"window._ttsDurationMs && window._ttsDurationMs({ms});")
+
+    def _effective_word_mode(self) -> bool:
+        engine = self._config.get('preferred_engine', 'Piper')
+        return bool(self._config.get('tts_word_mode', False)) and engine == 'Piper'
+
+    @pyqtSlot(str)
+    def onChaptersExtracted(self, chapters_json):
+        self.chaptersExtracted.emit(chapters_json)
+
     @pyqtSlot(str)
     def log(self, message):
         print(f"[JS] {message}")
@@ -72,45 +85,45 @@ class ReaderBridge(QObject):
     @pyqtSlot(int)
     def onSectionChanged(self, index):
         print(f"[Reader] Секция: {index}")
+        if self.reader is not None:
+            self.reader._current_section_index = index
 
     @pyqtSlot()
     def onBookReady(self):
-        """JS сообщает что книга готова — скрываем оверлей, показываем web_view."""
         self.reader.web_view.setVisible(True)
         if hasattr(self.reader, '_loading_overlay'):
             self.reader._loading_overlay.fadeOut()
-        # Запускаем циклическую очистку памяти каждые 4 секунды
-        QTimer.singleShot(4000, self._trim_process_memory)
+        # Интервал увеличен с 4с до 15с: сама очистка дешёвая, но тикать
+        # навсегда каждые 4с — лишние пробуждения CPU без реальной пользы.
+        QTimer.singleShot(15000, self._trim_process_memory)
 
     @staticmethod
     def _trim_process_memory():
-        """Возвращает свободную память ОС.
-        Linux  : malloc_trim(0) — возвращает пустые арены glibc ядру
-        Windows: EmptyWorkingSet — освобождает неиспользуемые страницы процесса
-        Циклический вызов каждые 4 секунды — Chromium жадно держит память,
-        его нужно «пинать» чтобы он отдавал страницы обратно ОС.
-        """
         try:
             import ctypes
             import sys
             if sys.platform == 'win32':
-                # Windows: EmptyWorkingSet освобождает все страницы, которые
-                # процесс не использует активно. Аналог malloc_trim на Linux.
-                # psapi.dll есть во всех версиях Windows начиная с XP.
                 kernel32 = ctypes.windll.kernel32
                 psapi = ctypes.windll.psapi
                 process = kernel32.GetCurrentProcess()
                 result = psapi.EmptyWorkingSet(process)
                 print(f'[Memory] EmptyWorkingSet -> {"OK" if result else "FAILED"}')
             else:
-                # Linux: malloc_trim возвращает пустые арены glibc ядру
                 libc = ctypes.CDLL('libc.so.6', use_errno=True)
                 result = libc.malloc_trim(0)
-                print(f'[Memory] malloc_trim(0) -> {result} (1=OK, страницы возвращены ОС)')
+                print(f'[Memory] malloc_trim(0) -> {result} (1=OK)')
         except Exception as e:
             print(f'[Memory] Ошибка очистки памяти: {e}')
-        # Рекурсивный вызов — таймер работает циклически, пока жив процесс
-        QTimer.singleShot(4000, ReaderBridge._trim_process_memory)
+        # Сводная память приложения (главный процесс + все QtWebEngineProcess)
+        # одной строкой — замена тому, что раньше давал --single-process в
+        # диспетчере задач, но без его цены по CPU. Переиспользуем этот же
+        # тик, чтобы не заводить отдельный таймер.
+        try:
+            from process_monitor import format_app_memory_report
+            print(format_app_memory_report())
+        except Exception as e:
+            print(f'[Memory] Ошибка сводки по процессам: {e}')
+        QTimer.singleShot(15000, ReaderBridge._trim_process_memory)
 
     @pyqtSlot(result=str)
     def getBookData(self):
@@ -124,20 +137,12 @@ class ReaderBridge(QObject):
                          'cbz'  if ext == '.cbz'  else
                          'pdf'  if ext == '.pdf'  else
                          'mobi' if ext == '.mobi' else 'unknown')
-            # Передаём file:// URL — JS загружает книгу напрямую через fetch().
-            # Это работает благодаря флагам --disable-web-security и
-            # --allow-file-access-from-files в Chromium.
-            # Выигрыш по памяти для 15 МБ FB2:
-            #   base64-путь: ~20 МБ Python + ~20 МБ JS + ~15 МБ Uint8Array = ~55 МБ пиковых
-            #   file://-путь: ~15 МБ ArrayBuffer = ~15 МБ пиковых
             file_url = book_path.as_uri()
             mb = book_path.stat().st_size / 1024 / 1024
-            print(f"[Bridge] {book_type.upper()} {mb:.1f} MB -> file://, passing URL to JS")
+            print(f"[Bridge] {book_type.upper()} {mb:.1f} MB -> file://")
             return json.dumps({
-                'type':     book_type,
-                'name':     book_path.name,
-                'file_url': file_url,
-                'path':     str(book_path),
+                'type': book_type, 'name': book_path.name,
+                'file_url': file_url, 'path': str(book_path),
             })
         except Exception as e:
             print(f"[Bridge] getBookData error: {e}")
@@ -152,7 +157,6 @@ class ReaderBridge(QObject):
 
     @pyqtSlot(result=str)
     def getLanguage(self):
-        """Возвращает язык интерфейса: 'ru' или 'en'."""
         return self._config.get('language', 'ru')
 
     @pyqtSlot(result=str)
@@ -174,6 +178,9 @@ class ReaderBridge(QObject):
         tts = self._tts
         if tts:
             tts.set_preferred_engine(engine_name)
+            eff = bool(self._config.get('tts_word_mode', False)) and engine_name == 'Piper'
+            self._run_js("window.applySettingFromPython && "
+                         f"window.applySettingFromPython('tts_word_mode', {json.dumps(eff)})")
 
     @pyqtSlot(str)
     def setVoice(self, voice_id):
@@ -192,34 +199,27 @@ class ReaderBridge(QObject):
         tts = self._tts
         if tts and text:
             print(f"[Reader] onTTSText: {text[:50]}...")
-            # Устанавливаем duration_callback ДО speak() — клиент сбрасывает его
-            # при каждом новом speak(), поэтому ставим сразу перед вызовом.
             if hasattr(tts.active_client, '_duration_callback'):
-                def _send_duration(ms):
-                    if self.reader is not None:
-                        js = f"window._ttsDurationMs && window._ttsDurationMs({ms});"
-                        self.reader.web_view.page().runJavaScript(js)
-                tts.active_client._duration_callback = _send_duration
-            # Пословные тайминги — только для Edge TTS (нативные WordBoundary события)
-            if hasattr(tts.active_client, '_word_timing_callback'):
+                tts.active_client._duration_callback = \
+                    lambda ms: self.ttsDurationReady.emit(int(ms))
+            if (hasattr(tts.active_client, '_word_timing_callback')
+                    and getattr(tts.active_client, 'name', '') == 'Piper'):
                 def _send_word_timings(timings):
-                    # Вызывается из фонового asyncio-потока Edge TTS.
-                    # runJavaScript нельзя дёргать не из главного потока Qt —
-                    # перекидываем выполнение через QTimer.singleShot(0, ...).
-                    def _do_send():
-                        if self.reader is not None:
-                            import json as _json
-                            js = (f"window._ttsWordTimings && "
-                                  f"window._ttsWordTimings({_json.dumps(timings)});")
-                            self.reader.web_view.page().runJavaScript(js)
-                    QTimer.singleShot(0, _do_send)
+                    import json as _json
+                    slowed = [
+                        {**t,
+                         'start_ms': round(t.get('start_ms', 0) * 1.15),
+                         'end_ms': round(t.get('end_ms', 0) * 1.15)}
+                        for t in timings
+                    ]
+                    self.wordTimingsReady.emit(_json.dumps(slowed))
                 tts.active_client._word_timing_callback = _send_word_timings
             tts.speak(text, self._on_tts_finished)
         else:
             print(f"[Reader] onTTSText: окно закрывается, игнорируем")
 
     def _on_tts_finished(self):
-        if self.reader is not None:   # окно ещё живо
+        if self.reader is not None:
             self.ttsFinished.emit()
 
     @pyqtSlot()
@@ -242,36 +242,31 @@ class ReaderBridge(QObject):
 
     @pyqtSlot(str)
     def copyToClipboard(self, text):
-        clipboard = QApplication.clipboard()
-        clipboard.setText(text)
+        QApplication.clipboard().setText(text)
         print(f"[Reader] Текст скопирован в буфер: {text[:50]}...")
 
     @pyqtSlot()
     def onMouseMove(self):
-        """Вызывается из JS при движении мыши — сбрасываем таймер скрытия курсора."""
         if self._r:
             self._r._show_cursor()
 
     @pyqtSlot()
     def showLibrary(self):
-        if self._r: self._r.show_library()
+        if self._r:
+            self._r.show_library()
 
     @pyqtSlot()
     def showSettings(self):
         from settings_window import SettingsWindow
-        # Убеждаемся что web_view видим — иначе Qt зависнет показывая диалог
         self.reader.web_view.setVisible(True)
         self.settings_window = SettingsWindow(self._config, self.reader)
         self.settings_window.finished.connect(lambda: self._config.save())
-        # Подключаем колбэки чтобы изменения в настройках экрана
-        # применялись сразу без перезапуска
         self.settings_window._screen_inhibit_changed_cb = \
             lambda enabled: self.reader._apply_screen_inhibit()
         self.settings_window._screen_timeout_changed_cb = \
             lambda minutes: self.reader._apply_screen_inhibit()
         self.settings_window._cursor_autohide_changed_cb = \
             lambda enabled: self.reader._apply_cursor_autohide()
-        # Обновляем кнопку отладки при смене режима разработчика
         self.settings_window._dev_mode_changed_cb = \
             lambda enabled: self.reader.web_view.page().runJavaScript(
                 f'if(window.setDevMode) window.setDevMode({"true" if enabled else "false"})')
@@ -283,9 +278,13 @@ class ReaderBridge(QObject):
         self.correction_window = TTSCorrectionWindow(self._config, self.reader)
         self.correction_window.show()
 
+    @pyqtSlot()
+    def showAudioRecorder(self):
+        self._run_js("window.extractChaptersForAudiobook && "
+                     "window.extractChaptersForAudiobook()")
+
     @pyqtSlot(str, float)
     def savePosition(self, position_json, progress):
-        """Сохранить позицию для текущего формата книги."""
         if not (self._r and self._r.current_book):
             return
         try:
@@ -296,7 +295,6 @@ class ReaderBridge(QObject):
 
     @pyqtSlot(result=str)
     def getPosition(self):
-        """Вернуть позицию для текущего формата книги."""
         if not (self._r and self._r.current_book):
             return json.dumps(None)
         bookmark = self._config.get_bookmark(self._r.current_book)
@@ -310,14 +308,11 @@ class ReaderBridge(QObject):
             return
         try:
             position = json.loads(position_json)
-        except:
+        except Exception:
             position = {}
         bookmark = {
-            'id': str(uuid.uuid4()),
-            'label': label,
-            'progress': progress,
-            'position': position,
-            'timestamp': datetime.now().isoformat()
+            'id': str(uuid.uuid4()), 'label': label, 'progress': progress,
+            'position': position, 'timestamp': datetime.now().isoformat()
         }
         self._config.add_bookmark(self._r.current_book, bookmark)
         print(f"[Reader] Закладка добавлена: {label}")
@@ -326,8 +321,7 @@ class ReaderBridge(QObject):
     def getBookmarks(self):
         if not (self._r and self._r.current_book):
             return json.dumps([])
-        bookmarks = self._config.get_bookmarks(self._r.current_book)
-        return json.dumps(bookmarks)
+        return json.dumps(self._config.get_bookmarks(self._r.current_book))
 
     @pyqtSlot(str)
     def removeBookmark(self, bookmark_id):
@@ -341,7 +335,11 @@ class ReaderBridge(QObject):
 
     @pyqtSlot(result=str)
     def getSettings(self):
-        tts_color = self._config.get('tts_highlight_color', 'cyan')
+        tts_hex = self._config.get_tts_highlight_color()
+        tts_opacity = self._config.get_tts_highlight_opacity()
+        hexval = tts_hex.lstrip('#')
+        r, g, b = int(hexval[0:2], 16), int(hexval[2:4], 16), int(hexval[4:6], 16)
+        tts_rgba = f'rgba({r}, {g}, {b}, {tts_opacity})'
         highlight_style = self._config.get('default_highlight_style', 'highlight')
         settings = {
             'theme_bg': self._config.get('theme_bg', '#f4ecd8'),
@@ -350,24 +348,22 @@ class ReaderBridge(QObject):
             'line_height': self._config.get('line_height', 1.5),
             'spread_mode': self._config.get('spread_mode', 'auto'),
             'page_margin': self._config.get('page_margin', 44),
+            'panel_height': self._config.get('panel_height', 48),
             'default_highlight_style': highlight_style,
             'default_highlight_color': self._config.get('default_highlight_color', 'blue'),
             'tts_speed': self._config.get('tts_rate', 1.0),
             'tts_engine': self._config.get('preferred_engine', 'Piper'),
             'tts_voice': self._config.get(
                 'piper_voice' if self._config.get('preferred_engine', 'Piper') == 'Piper'
-                else 'edge_tts_voice',
-                'ru_RU_irina_medium'
-            ),
-            'tts_highlight_color': tts_color,
-            'tts_word_mode': self._config.get('tts_word_mode', False),
+                else 'edge_tts_voice', 'ru_RU_irina_medium'),
+            'tts_highlight_color_rgba': tts_rgba,
+            'tts_word_mode': self._effective_word_mode(),
             'reader_font_family': self._config.get('reader_font_family', self._config.DEFAULT_FONT),
             'font_faces': self._config.get_font_file_map(),
             'fonts_base_url': self._config.get_fonts_base_url(),
         }
         result = json.dumps(settings)
-        print(f"[Reader] Настройки отправлены в JS: стиль={highlight_style}, TTS цвет={tts_color}")
-        # Применяем режим разработчика — показываем/скрываем кнопку отладки
+        print(f"[Reader] Настройки отправлены в JS: стиль={highlight_style}, TTS rgba={tts_rgba}")
         dev_mode = self._config.get('debug_log', False)
         if self._r and self._r.web_view:
             js = f'if(window.setDevMode) window.setDevMode({"true" if dev_mode else "false"});'
@@ -392,15 +388,24 @@ class ReaderBridge(QObject):
         except Exception as e:
             print(f"[Reader] Ошибка сохранения настройки: {e}")
 
+    @pyqtSlot(str)
+    def openTranslator(self, text):
+        """Открывает отдельное окно переводчика (translator_window.py) с
+        выделенным текстом. Морфологический разбор слова (офлайн,
+        pymorphy3) показывается прямо внутри этого окна; сам перевод —
+        через онлайн-эндпоинт, в фоновом потоке внутри окна."""
+        from translator_window import TranslatorWindow
+        self.translator_window = TranslatorWindow(self._config, initial_text=text)
+        self.translator_window.show()
+        self.translator_window.raise_()
+        self.translator_window.activateWindow()
+
     @pyqtSlot(result=str)
     def getTTSCorrections(self):
-        """Получить список коррекций TTS"""
-        corrections = self._config.get('tts_corrections', [])
-        return json.dumps(corrections)
+        return json.dumps(self._config.get('tts_corrections', []))
 
     @pyqtSlot(str)
     def saveTTSCorrections(self, corrections_json):
-        """Сохранить список коррекций TTS"""
         try:
             corrections = json.loads(corrections_json)
             self._config.set('tts_corrections', corrections)
@@ -413,14 +418,9 @@ class ReaderBridge(QObject):
         try:
             cfi_data = json.loads(cfi) if cfi else {}
             highlight_id = cfi_data.get('id') or str(uuid.uuid4())
-            highlight = {
-                'id': highlight_id,
-                'text': text,
-                'color': color,
-                'style': style,
-                'cfi': cfi,
-                'timestamp': datetime.now().isoformat()
-            }
+            highlight = {'id': highlight_id, 'text': text, 'color': color,
+                         'style': style, 'cfi': cfi,
+                         'timestamp': datetime.now().isoformat()}
             self._config.add_highlight(self._r.current_book, highlight)
             print(f"[Reader] Подсветка сохранена: {highlight['id']}")
         except Exception as e:
@@ -430,28 +430,21 @@ class ReaderBridge(QObject):
     def getHighlights(self):
         if not (self._r and self._r.current_book):
             return json.dumps([])
-        highlights = self._config.get_highlights(self._r.current_book)
-        return json.dumps(highlights)
+        return json.dumps(self._config.get_highlights(self._r.current_book))
 
     @pyqtSlot(str)
     def removeHighlight(self, highlight_id):
         self._config.remove_highlight(self._r.current_book, highlight_id)
         print(f"[Reader] Подсветка удалена: {highlight_id}")
 
-    # ── Заметки ───────────────────────────────────────────────────────────
     @pyqtSlot(str, str, str)
     def saveNote(self, highlight_id, note_text, cfi_json):
-        """Сохранить заметку, привязанную к выделению (highlight_id) или позиции (cfi)."""
         if not (self._r and self._r.current_book):
             return
         try:
-            note = {
-                'id':           str(uuid.uuid4()),
-                'highlight_id': highlight_id,   # '' если заметка без выделения
-                'text':         note_text,
-                'cfi':          cfi_json,
-                'timestamp':    datetime.now().isoformat(),
-            }
+            note = {'id': str(uuid.uuid4()), 'highlight_id': highlight_id,
+                    'text': note_text, 'cfi': cfi_json,
+                    'timestamp': datetime.now().isoformat()}
             self._config.add_note(self._r.current_book, note)
             print(f"[Reader] Заметка сохранена: {note['id'][:8]}…")
         except Exception as e:
@@ -459,21 +452,18 @@ class ReaderBridge(QObject):
 
     @pyqtSlot(result=str)
     def getNotes(self):
-        """Вернуть все заметки текущей книги как JSON."""
         if not (self._r and self._r.current_book):
             return json.dumps([])
         return json.dumps(self._config.get_notes(self._r.current_book))
 
     @pyqtSlot(str)
     def removeNote(self, note_id):
-        """Удалить заметку по ID."""
         if self._r and self._r.current_book:
             self._config.remove_note(self._r.current_book, note_id)
             print(f"[Reader] Заметка удалена: {note_id}")
 
     @pyqtSlot(str, str)
     def updateNote(self, note_id, new_text):
-        """Обновить текст существующей заметки."""
         if not (self._r and self._r.current_book):
             return
         notes = self._config.get_notes(self._r.current_book)
@@ -489,37 +479,25 @@ class ReaderBridge(QObject):
     @pyqtSlot(str)
     def saveQuoteImage(self, base64_data):
         try:
-            library_path = Path(self._config.library_path)
-            quotes_dir = library_path / 'Quotes'
+            quotes_dir = Path(self._config.library_path) / 'Quotes'
             quotes_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-            filename = f'quote_{timestamp}.png'
+            filename = f'quote_{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.png'
             filepath = quotes_dir / filename
-            image_data = base64.b64decode(base64_data)
-            with open(filepath, 'wb') as f:
-                f.write(image_data)
+            filepath.write_bytes(base64.b64decode(base64_data))
             print(f"[Reader] Цитата сохранена: {filepath}")
         except Exception as e:
             print(f"[Reader] Ошибка сохранения цитаты: {e}")
-            import traceback
-            traceback.print_exc()
 
     @pyqtSlot(result=str)
     def getPiperVoices(self):
         from piper_voice_downloader import PiperVoiceDownloader
-        voices_dir = self._config.voices_dir
-        downloader = PiperVoiceDownloader(voices_dir)
+        downloader = PiperVoiceDownloader(self._config.voices_dir)
         result = []
         for voice_data in downloader.RUSSIAN_VOICES:
             voice_id = voice_data["name"]
-            installed = downloader.check_voice_exists(voice_id)
-            result.append({
-                'id': voice_id,
-                'name': voice_data["display_name"],
-                'quality': voice_data["quality"],
-                'size_mb': 83,
-                'installed': installed,
-            })
+            result.append({'id': voice_id, 'name': voice_data["display_name"],
+                           'quality': voice_data["quality"], 'size_mb': 83,
+                           'installed': downloader.check_voice_exists(voice_id)})
         n_inst = sum(1 for r in result if r['installed'])
         print(f"[Bridge] getPiperVoices: {n_inst}/{len(result)} загружено")
         return json.dumps(result)
@@ -527,38 +505,28 @@ class ReaderBridge(QObject):
     @pyqtSlot(str, result=bool)
     def checkVoiceAvailability(self, voice_id):
         from piper_voice_downloader import PiperVoiceDownloader
-        voices_dir = self._config.voices_dir
-        downloader = PiperVoiceDownloader(voices_dir)
-        return downloader.check_voice_exists(voice_id)
+        return PiperVoiceDownloader(self._config.voices_dir).check_voice_exists(voice_id)
 
     @pyqtSlot(str)
     def downloadVoice(self, voice_id):
         from piper_voice_downloader import PiperVoiceDownloader, DownloadWorker, PiperVoiceInfo
-        voices_dir = self._config.voices_dir
-        downloader = PiperVoiceDownloader(voices_dir)
+        downloader = PiperVoiceDownloader(self._config.voices_dir)
         voice_info = None
         for v in downloader.RUSSIAN_VOICES:
             if v["name"] == voice_id:
-                voice_info = PiperVoiceInfo(name=v["name"], quality=v["quality"], onnx_url=v["onnx"], json_url=v["json"])
+                voice_info = PiperVoiceInfo(name=v["name"], quality=v["quality"],
+                                            onnx_url=v["onnx"], json_url=v["json"])
                 break
         if not voice_info:
             print(f"[Bridge] downloadVoice: '{voice_id}' не найден")
             self.piperError.emit(voice_id, f'Голос не найден: {voice_id}')
             return
         print(f"[Bridge] Начало загрузки: {voice_id}")
-        def on_progress(downloaded, total):
-            pct = int(downloaded * 100 / total) if total > 0 else 0
-            self.piperProgress.emit(voice_id, pct)
-        worker = DownloadWorker(downloader, voice_info, on_progress)
-        worker.finished.connect(lambda ok: self._on_voice_download_finished(voice_id, ok))
-        worker.error.connect(lambda err: self._on_voice_download_error(voice_id, err))
+        worker = DownloadWorker(downloader, voice_info,
+                                lambda d, t: self.piperProgress.emit(voice_id, int(d * 100 / t) if t else 0))
+        worker.finished.connect(lambda ok: self.piperFinished.emit(voice_id, ok))
+        worker.error.connect(lambda err: self.piperError.emit(voice_id, str(err)))
         worker.start()
-
-    def _on_voice_download_finished(self, voice_id, ok):
-        self.piperFinished.emit(voice_id, ok)
-
-    def _on_voice_download_error(self, voice_id, error):
-        self.piperError.emit(voice_id, str(error))
 
     @pyqtSlot(result=str)
     def getSystemEngines(self):
@@ -572,32 +540,19 @@ class ReaderBridge(QObject):
             voices = client.get_voices()
             if not voices:
                 continue
-            result.append({
-                'key': name,
-                'label': self._engine_label(name),
-                'voices': [{'id': v.get('id', ''), 'name': v.get('name', '')} for v in voices],
-            })
+            result.append({'key': name, 'label': self._engine_label(name),
+                           'voices': [{'id': v.get('id', ''), 'name': v.get('name', '')} for v in voices]})
         return json.dumps(result)
 
     @staticmethod
     def _engine_label(key: str) -> str:
-        LABELS = {
-            'SAPI5': 'SAPI5 (Windows)',
-            'RHVoice': 'RHVoice',
-            'rhvoice': 'RHVoice',
-            'espeak_ng': 'eSpeak NG',
-            'espeak': 'eSpeak',
-            'festival': 'Festival',
-            'flite': 'Flite',
-            'SpeechD': 'speech-dispatcher',
-        }
+        LABELS = {'SAPI5': 'SAPI5 (Windows)', 'RHVoice': 'RHVoice', 'rhvoice': 'RHVoice',
+                  'espeak_ng': 'eSpeak NG', 'espeak': 'eSpeak', 'festival': 'Festival',
+                  'flite': 'Flite', 'SpeechD': 'speech-dispatcher'}
         return LABELS.get(key, key)
 
 
 class _LoadingOverlay(QWidget):
-    """Оверлей поверх QMainWindow с анимацией загрузки.
-    Рисуется на уровне Qt — не зависит от Chromium."""
-
     def __init__(self, parent, bg_color: str = '#f4ecd8'):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -605,7 +560,7 @@ class _LoadingOverlay(QWidget):
         self._angle = 0
         self._book_name = ''
         self._timer = QTimer(self)
-        self._timer.setInterval(16)  # ~60 fps
+        self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
         self.raise_()
@@ -625,45 +580,34 @@ class _LoadingOverlay(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # Фон
         p.fillRect(self.rect(), self._bg)
         cx, cy = self.width() / 2, self.height() / 2
         is_dark = self._bg.lightness() < 128
         text_color = QColor('#e0e0e0') if is_dark else QColor('#5b4636')
-        sub_color  = QColor('#888888')
-        spin_bg    = QColor(120, 120, 120, 40)
-        spin_fg    = QColor('#6c5ce7')
-        # Название книги
+        sub_color = QColor('#888888')
+        spin_bg = QColor(120, 120, 120, 40)
+        spin_fg = QColor('#6c5ce7')
         if self._book_name:
-            # Метка ЗАГРУЗКА
             lbl_font = QFont()
             lbl_font.setPointSize(9)
             lbl_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 3)
             p.setFont(lbl_font)
             p.setPen(sub_color)
             p.drawText(self.rect().adjusted(0, 0, 0, -120),
-                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
-                       'ЗАГРУЗКА')
-            # Название
+                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, 'ЗАГРУЗКА')
             name_font = QFont()
             name_font.setPointSize(16)
             name_font.setBold(True)
             p.setFont(name_font)
             p.setPen(text_color)
-            name_rect = self.rect().adjusted(40, 40, -40, -40)
-            p.drawText(name_rect,
-                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
-                       self._book_name)
-        # Спиннер
-        r = 18
-        pen_w = 3
+            p.drawText(self.rect().adjusted(40, 40, -40, -40),
+                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, self._book_name)
+        r, pen_w = 18, 3
         spinner_rect = QRectF(cx - r, cy + 40, r * 2, r * 2)
-        # Фоновое кольцо
         pen = QPen(spin_bg, pen_w)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
         p.drawEllipse(spinner_rect)
-        # Дуга
         pen2 = QPen(spin_fg, pen_w)
         pen2.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen2)
@@ -672,12 +616,9 @@ class _LoadingOverlay(QWidget):
 
     def fadeOut(self):
         self._timer.stop()
-        # QPropertyAnimation на windowOpacity не работает для дочерних виджетов.
-        # Используем простое скрытие через таймер чтобы не зависала анимация.
         self.hide()
 
     def forceHide(self):
-        """Немедленно скрыть без анимации — вызывается из closeEvent."""
         self._timer.stop()
         self.hide()
 
@@ -688,30 +629,25 @@ class ReaderWindow(QMainWindow):
         self.config = config
         self.app_instance = app_instance
         self.current_book = None
+        self._current_section_index = None
         self.page_loaded = False
         self._tts_data_pushed = False
         self.settings_window = None
-        self._closing = False  # защита от повторного closeEvent
+        self._closing = False
 
-        # Подавление гашения экрана (кофеин-режим)
         from screen_inhibit import ScreenInhibitor
         self._screen_inhibitor = ScreenInhibitor()
         self._screen_timeout_timer = QTimer(self)
         self._screen_timeout_timer.setSingleShot(True)
         self._screen_timeout_timer.timeout.connect(self._on_screen_timeout)
 
-        # Автоскрытие курсора мыши при бездействии
         self._cursor_hidden = False
         self._cursor_hide_timer = QTimer(self)
         self._cursor_hide_timer.setSingleShot(True)
         self._cursor_hide_timer.timeout.connect(self._hide_cursor)
-        self._cursor_hide_delay = 3000  # 3 секунды бездействия
+        self._cursor_hide_delay = 3000
 
-        # Каждое окно читалки владеет собственным TTSController.
-        # Это позволяет открывать несколько книг одновременно без конфликтов.
         if tts_controller is not None:
-            # Обратная совместимость: если передан извне — используем его,
-            # но при закрытии НЕ вызываем shutdown() (не наш)
             self.tts_controller = tts_controller
             self._owns_tts = False
         else:
@@ -719,24 +655,19 @@ class ReaderWindow(QMainWindow):
             self._owns_tts = True
 
         self.setMinimumSize(800, 600)
-        # Красим фон самого окна под тему — иначе при максимизации Qt
-        # показывает системный фон в области ещё не отрисованной Chromium
         theme_bg = config.get('theme_bg', '#f4ecd8')
         self.setStyleSheet(f"QMainWindow {{ background: {theme_bg}; }}")
-        # Восстанавливаем размер для случая когда пользователь снял максимизацию
         self.resize(config.get('reader_width', 1280), config.get('reader_height', 800))
         self.showMaximized()
+
         self._setup_ui()
         self._setup_webchannel()
         self._setup_shortcuts()
-        # Qt-оверлей поверх окна — виден пока web_view скрыт
-        theme_bg = config.get('theme_bg', '#f4ecd8')
+
         self._loading_overlay = _LoadingOverlay(self, theme_bg)
         self._loading_overlay.setGeometry(self.rect())
         self._loading_overlay.show()
-        # Применяем настройку экрана при старте
         self._apply_screen_inhibit()
-        # Перехватываем события мыши на web_view для автоскрытия курсора
         self.web_view.setMouseTracking(True)
         self.web_view.installEventFilter(self)
 
@@ -747,22 +678,17 @@ class ReaderWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         self.web_view = QWebEngineView()
         settings = self.web_view.settings()
-        # Включаем только необходимое
         settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False)
-        # Отключаем лишнее для экономии памяти
-        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)   # нужен для TTS-настроек (localStorage)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.DnsPrefetchEnabled, False)
         settings.setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, False)
         settings.setAttribute(QWebEngineSettings.WebAttribute.ErrorPageEnabled, False)
         settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, False)
         settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, False)
         settings.setAttribute(QWebEngineSettings.WebAttribute.ScreenCaptureEnabled, False)
-        # Профиль WebEngine настраивается централизованно в main.py
-        # (до создания любого QWebEngineView) — здесь только добираем view.
         profile = self.web_view.page().profile()
-        # Двойная страховка: если окно создано в обход main.py (тесты и т.п.)
         try:
             from PyQt6.QtWebEngineCore import QWebEngineProfile as _P
             profile.setHttpCacheMaximumSize(0)
@@ -770,46 +696,61 @@ class ReaderWindow(QMainWindow):
         except Exception:
             pass
         layout.addWidget(self.web_view)
-        # Путь к reader.html: в скомпилированном приложении (PyInstaller)
-        # __file__ указывает на директорию извлечённых файлов.
-        # В режиме --onefile эта директория меняется при каждом запуске →
-        # нужно использовать sys._MEIPASS (стабильный путь при --onedir,
-        # или правильный временный при --onefile).
         if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
             base = Path(sys._MEIPASS)
         else:
             base = Path(__file__).parent
         html_path = base / 'ibc' / 'reader.html'
         if html_path.exists():
-            print(f"[Reader]  HTML: {html_path}")
+            print(f"[Reader] HTML: {html_path}")
             self.web_view.setUrl(QUrl.fromLocalFile(str(html_path)))
         else:
-            print(f"[Reader]  reader.html не найден: {html_path}")
+            print(f"[Reader] reader.html не найден: {html_path}")
 
     def _setup_webchannel(self):
         self.bridge = ReaderBridge(self)
         self.bridge.ttsFinished.connect(self._on_tts_finished)
+        self.bridge.chaptersExtracted.connect(self._on_chapters_extracted)
         self.channel = QWebChannel()
         self.channel.registerObject('readerBridge', self.bridge)
         self.web_view.page().setWebChannel(self.channel)
         self.web_view.loadFinished.connect(self._on_page_loaded)
-        # Прячем виджет до полной загрузки книги — убирает flash
         self.web_view.setVisible(False)
-        # Красим фон Chromium под тему — убирает белый flash до первого paint
         from PyQt6.QtGui import QColor
-        theme_bg = self.config.get('theme_bg', '#f4ecd8')
-        self.web_view.page().setBackgroundColor(QColor(theme_bg))
+        self.web_view.page().setBackgroundColor(QColor(self.config.get('theme_bg', '#f4ecd8')))
 
     def _on_tts_finished(self):
         print("[Reader] TTS finished -> вызываем window.ttsNext()")
         self.web_view.page().runJavaScript("window.ttsNext && window.ttsNext();")
 
+    def _on_chapters_extracted(self, chapters_json):
+        import json as _json
+        try:
+            data = _json.loads(chapters_json)
+        except Exception as e:
+            print(f"[Reader] Ошибка разбора chaptersExtracted: {e}")
+            return
+        if data.get('error'):
+            print(f"[Reader] extractChaptersForAudiobook: {data['error']}")
+            chapters = []
+            book_title = ''
+        else:
+            chapters = data.get('chapters', [])
+            book_title = data.get('bookTitle', '')
+        from audio_recorder_window import AudioRecorderWindow
+        self.web_view.setVisible(True)
+        self.audio_recorder_window = AudioRecorderWindow(
+            self.config, self, chapters,
+            current_section_index=self._current_section_index,
+            book_title=book_title,
+        )
+        self.audio_recorder_window.show()
+
     def _on_page_loaded(self, ok):
         if ok:
             self.page_loaded = True
-            # Показываем web_view сразу — статический баннер в HTML уже виден,
-            # книга появится плавно через CSS когда будет готова
             self.web_view.setVisible(True)
+
             if self.current_book:
                 QTimer.singleShot(500, self._load_book)
             if not self._tts_data_pushed:
@@ -820,27 +761,29 @@ class ReaderWindow(QMainWindow):
         import json as _json
         try:
             from piper_voice_downloader import PiperVoiceDownloader
-            voices_dir = self.config.voices_dir
-            downloader = PiperVoiceDownloader(voices_dir)
+            downloader = PiperVoiceDownloader(self.config.voices_dir)
             piper_voices = []
             for voice_data in downloader.RUSSIAN_VOICES:
-                voice_id = voice_data["name"]
-                installed = downloader.check_voice_exists(voice_id)
-                piper_voices.append({'id': voice_id, 'name': voice_data["display_name"], 'installed': installed, 'size_mb': 83})
+                piper_voices.append({'id': voice_data["name"],
+                                     'name': voice_data["display_name"],
+                                     'installed': downloader.check_voice_exists(voice_data["name"]),
+                                     'size_mb': 83})
             print(f"[Push] Piper: {sum(1 for v in piper_voices if v['installed'])}/{len(piper_voices)} загружено")
-            self.web_view.page().runJavaScript(f"window._pushPiperVoices && window._pushPiperVoices({_json.dumps(piper_voices)});")
+            self.web_view.page().runJavaScript(
+                f"window._pushPiperVoices && window._pushPiperVoices({_json.dumps(piper_voices)});")
             sys_engines = []
             if self.tts_controller:
                 for client in self.tts_controller.clients:
-                    name = client.name
-                    if name in ('Edge', 'Piper', 'eSpeak'):
+                    if client.name in ('Edge', 'Piper', 'eSpeak'):
                         continue
                     voices = client.get_voices()
                     if not voices:
                         continue
-                    sys_engines.append({'key': name, 'label': self._engine_label(name), 'voices': [{'id': v.get('id',''), 'name': v.get('name','')} for v in voices]})
+                    sys_engines.append({'key': client.name, 'label': self._engine_label(client.name),
+                                        'voices': [{'id': v.get('id', ''), 'name': v.get('name', '')} for v in voices]})
             print(f"[Push] Системные движки: {[e['key'] for e in sys_engines]}")
-            self.web_view.page().runJavaScript(f"window._pushSystemEngines && window._pushSystemEngines({_json.dumps(sys_engines)});")
+            self.web_view.page().runJavaScript(
+                f"window._pushSystemEngines && window._pushSystemEngines({_json.dumps(sys_engines)});")
         except Exception as e:
             import traceback
             print(f"[Push] Ошибка: {e}")
@@ -848,14 +791,23 @@ class ReaderWindow(QMainWindow):
 
     @staticmethod
     def _engine_label(key: str) -> str:
-        LABELS = {'SAPI5': 'SAPI5 (Windows)', 'RHVoice': 'RHVoice', 'rhvoice': 'RHVoice', 'espeak_ng': 'eSpeak NG', 'espeak': 'eSpeak', 'festival': 'Festival', 'flite': 'Flite', 'SpeechD': 'speech-dispatcher'}
+        LABELS = {'SAPI5': 'SAPI5 (Windows)', 'RHVoice': 'RHVoice', 'rhvoice': 'RHVoice',
+                  'espeak_ng': 'eSpeak NG', 'espeak': 'eSpeak', 'festival': 'Festival',
+                  'flite': 'Flite', 'SpeechD': 'speech-dispatcher'}
         return LABELS.get(key, key)
 
     def _load_book(self):
-        # Показываем название книги в оверлее
         if hasattr(self, '_loading_overlay') and self.current_book:
             import os
-            name = os.path.splitext(os.path.basename(str(self.current_book)))[0]
+            name = None
+            try:
+                rec = self.config.get_book_by_path(str(self.current_book))
+                if rec:
+                    name = (rec.get('title') or '').strip() or None
+            except Exception:
+                name = None
+            if not name:
+                name = os.path.splitext(os.path.basename(str(self.current_book)))[0]
             self._loading_overlay.set_book_name(name)
         js = """
         if (window.bridge && window.loadBook) {
@@ -867,7 +819,6 @@ class ReaderWindow(QMainWindow):
         self.web_view.page().runJavaScript(js)
 
     def _apply_screen_inhibit(self):
-        """Применяет настройку подавления гашения экрана из конфига."""
         enabled = self.config.get('screen_inhibit', False)
         timeout_min = self.config.get('screen_inhibit_timeout', 0)
         print(f'[ScreenInhibit] _apply: enabled={enabled} timeout={timeout_min}min')
@@ -877,18 +828,14 @@ class ReaderWindow(QMainWindow):
             print(f'[ScreenInhibit] inhibit() -> {"OK" if ok else "FAILED"}')
             if ok and timeout_min > 0:
                 self._screen_timeout_timer.start(timeout_min * 60 * 1000)
-                print(f'[ScreenInhibit] Таймер запущен: {timeout_min} мин')
         else:
             self._screen_inhibitor.uninhibit()
-            print('[ScreenInhibit] uninhibit (отключено в настройках)')
 
     def _on_screen_timeout(self):
-        """Срабатывает по истечении таймера — снимаем запрет."""
         print('[ScreenInhibit] Таймер истёк — разрешаем гашение экрана')
         self._screen_inhibitor.uninhibit()
 
     def _apply_cursor_autohide(self):
-        """Применяет настройку автоскрытия курсора из конфига."""
         enabled = self.config.get('cursor_autohide', True)
         if enabled:
             self._cursor_hide_timer.start(self._cursor_hide_delay)
@@ -897,15 +844,12 @@ class ReaderWindow(QMainWindow):
             self._show_cursor()
 
     def _hide_cursor(self):
-        """Скрывает курсор мыши."""
         if not self._cursor_hidden:
             self._cursor_hidden = True
             from PyQt6.QtGui import QCursor
-            from PyQt6.QtCore import Qt
             self.web_view.setCursor(Qt.CursorShape.BlankCursor)
 
     def _show_cursor(self):
-        """Показывает курсор мыши и перезапускает таймер."""
         if self._cursor_hidden:
             self._cursor_hidden = False
             self.web_view.unsetCursor()
@@ -913,30 +857,24 @@ class ReaderWindow(QMainWindow):
             self._cursor_hide_timer.start(self._cursor_hide_delay)
 
     def eventFilter(self, obj, event):
-        """Перехватываем события мыши на web_view."""
         from PyQt6.QtCore import QEvent
         if obj is self.web_view and event.type() == QEvent.Type.MouseMove:
             self._show_cursor()
         return super().eventFilter(obj, event)
 
     def mouseMoveEvent(self, event):
-        """При движении мыши — показываем курсор и сбрасываем таймер."""
         self._show_cursor()
         super().mouseMoveEvent(event)
 
     def load_book(self, book_path):
         self._apply_screen_inhibit()
         self._apply_cursor_autohide()
-        # Сообщаем TTS контроллеру путь к книге для локальных коррекций
         if hasattr(self.tts_controller, "set_current_book"):
             self.tts_controller.set_current_book(str(book_path))
-        # Вызываем book.destroy() перед сменой книги — освобождает blob URLs
-        # и позволяет GC собрать старую книгу (особенно важно для FB2).
         if self.current_book and self.page_loaded:
             self.web_view.page().runJavaScript(
                 "if (window._currentBook && typeof window._currentBook.destroy === 'function')"
-                " { window._currentBook.destroy(); window._currentBook = null; }"
-            )
+                " { window._currentBook.destroy(); window._currentBook = null; }")
         self.current_book = book_path
         self.setWindowTitle("NovaReader")
         self._tts_data_pushed = False
@@ -1002,13 +940,6 @@ class ReaderWindow(QMainWindow):
             self.web_view.page().runJavaScript("window._pagePrev && window._pagePrev();")
 
     def _clear_fb2_cache(self):
-        """
-        Страховка: очищает IndexedDB-базы с именем, содержащим 'folio' или 'fb2'.
-        foliate-js в текущей версии IndexedDB не использует (кэши — JS Map в памяти),
-        но на случай если в будущей версии появится персистентный кэш — этот метод
-        не даст ему накапливаться между сессиями.
-        Безопасно: не трогает настройки TTS (STORAGE_KEY / tts_settings в localStorage).
-        """
         js = """
         (function() {
             if (!window.indexedDB || !window.indexedDB.databases) return;
@@ -1029,11 +960,11 @@ class ReaderWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+
         if hasattr(self, '_loading_overlay'):
             if self._loading_overlay.isVisible():
                 self._loading_overlay.setGeometry(self.rect())
             elif self.web_view.isVisible():
-                # Отменяем предыдущий таймер если ещё не сработал
                 if hasattr(self, '_resize_hide_timer'):
                     self._resize_hide_timer.stop()
                 self._loading_overlay.set_book_name('')
@@ -1049,31 +980,30 @@ class ReaderWindow(QMainWindow):
             event.accept()
             return
         self._closing = True
-        # Немедленно останавливаем все таймеры оверлея — иначе зависание
+        aw = getattr(self, 'audio_recorder_window', None)
+        if aw is not None:
+            try:
+                aw.close()
+            except Exception:
+                pass
         if hasattr(self, '_resize_hide_timer'):
             self._resize_hide_timer.stop()
         if hasattr(self, '_loading_overlay'):
             self._loading_overlay.forceHide()
-        # Сохраняем размер только если не максимизировано
         if not self.isMaximized():
             self.config.set('reader_width', self.width())
             self.config.set('reader_height', self.height())
             self.config.save()
-        # Снимаем запрет гашения экрана при закрытии
         try:
             self._screen_timeout_timer.stop()
             self._screen_inhibitor.uninhibit()
         except Exception:
             pass
-        # Страховочная очистка IndexedDB-кэша FB2 перед закрытием
         try:
             if self.current_book and str(self.current_book).lower().endswith('.fb2'):
                 self._clear_fb2_cache()
         except Exception:
             pass
-        # Останавливаем TTS только если именно это окно что-то воспроизводило.
-        # tts_controller.stop() трогает глобальный AudioPlayer — если вызвать его
-        # из окна где TTS не играл, это оборвёт воспроизведение в другом окне.
         if self.tts_controller:
             was_active = self.tts_controller.state in ('playing', 'paused')
             if was_active:
@@ -1086,36 +1016,25 @@ class ReaderWindow(QMainWindow):
                 except Exception:
                     pass
             else:
-                # TTS не играл — только сбрасываем состояние клиентов,
-                # не трогая глобальный AudioPlayer
                 try:
                     self.tts_controller.state = 'stopped'
                     if self.tts_controller.active_client:
                         self.tts_controller.active_client._stop_flag = True
                 except Exception:
                     pass
-            # Полный шатдаун (включая release_audio_player) только если это
-            # последнее открытое окно читалки. Иначе глобальный AudioPlayer
-            # убьёт воспроизведение в других окнах.
             if self._owns_tts:
                 other_windows = []
                 if self.app_instance and hasattr(self.app_instance, 'reader_windows'):
                     other_windows = [w for w in self.app_instance.reader_windows
                                      if w is not self and not getattr(w, '_closing', False)]
                 if other_windows:
-                    # Другие окна живы — только останавливаем, не трогаем синглтон
-                    print(f"[Reader] closeEvent: есть {len(other_windows)} других окон, "
-                          f"shutdown() пропущен")
+                    print(f"[Reader] closeEvent: есть {len(other_windows)} других окон, shutdown() пропущен")
                 else:
-                    # Последнее окно — полный шатдаун
                     try:
                         self.tts_controller.shutdown()
                     except Exception:
                         pass
-            # Отключаем bridge от контроллера — callback'и больше не должны стрелять
             self.tts_controller = None
-        # Отключаем bridge от окна чтобы никакие JS-callback'и не дошли
-        # после того как окно начнёт разрушаться
         try:
             self.bridge.reader = None
         except Exception:

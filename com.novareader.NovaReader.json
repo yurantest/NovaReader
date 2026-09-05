@@ -1,0 +1,60 @@
+{
+    "app-id": "com.novareader.NovaReader",
+    "runtime": "org.freedesktop.Platform",
+    "runtime-version": "24.08",
+    "sdk": "org.freedesktop.Sdk",
+    "command": "launcher.sh",
+    "finish-args": [
+        "--share=ipc",
+        "--socket=wayland",
+        "--socket=fallback-x11",
+        "--share=network",
+        "--device=dri",
+        "--filesystem=host",
+        "--filesystem=home",
+        "--socket=pulseaudio",
+        "--env=LD_LIBRARY_PATH=/app/bin"
+    ],
+    "modules": [
+        {
+            "name": "x11-libs",
+            "buildsystem": "simple",
+            "build-commands": [
+                "mkdir -p /app/bin",
+                "cp /usr/lib/x86_64-linux-gnu/libxcb*.so* /app/bin/ 2>/dev/null || true",
+                "cp /usr/lib/x86_64-linux-gnu/libxkbcommon*.so* /app/bin/ 2>/dev/null || true",
+                "cp /usr/lib/x86_64-linux-gnu/libX*.so* /app/bin/ 2>/dev/null || true",
+                "cp /usr/lib/x86_64-linux-gnu/libGL*.so* /app/bin/ 2>/dev/null || true",
+                "cp /usr/lib/x86_64-linux-gnu/libEGL*.so* /app/bin/ 2>/dev/null || true",
+                "cp /usr/lib/x86_64-linux-gnu/libdrm*.so* /app/bin/ 2>/dev/null || true",
+                "cp /usr/lib/x86_64-linux-gnu/libgbm*.so* /app/bin/ 2>/dev/null || true",
+                "cp /usr/lib/x86_64-linux-gnu/libtiff*.so* /app/bin/ 2>/dev/null || true",
+                "cp /usr/lib/x86_64-linux-gnu/libQt6EglFsKms*.so* /app/bin/ 2>/dev/null || true",
+                "cp /usr/lib/x86_64-linux-gnu/libkrb5*.so* /app/bin/ 2>/dev/null || true",
+                "cp /usr/lib/x86_64-linux-gnu/libgssapi*.so* /app/bin/ 2>/dev/null || true",
+                "cp /usr/lib/x86_64-linux-gnu/libk5crypto*.so* /app/bin/ 2>/dev/null || true",
+                "cp /usr/lib/x86_64-linux-gnu/libcom_err*.so* /app/bin/ 2>/dev/null || true"
+            ],
+            "sources": []
+        },
+        {
+            "name": "novareader",
+            "buildsystem": "simple",
+            "build-commands": [
+                "mkdir -p /app/bin",
+                "cp -r dist/NovaReader/* /app/bin/",
+                "chmod +x /app/bin/NovaReader",
+                "chmod +x /app/bin/python3",
+                "ln -sf /app/bin/python3 /app/bin/python",
+                "cat > /app/bin/launcher.sh << 'LAUNCHER_EOF'\n#!/bin/bash\nexport LD_LIBRARY_PATH=/app/bin:${LD_LIBRARY_PATH}\nexport PYTHONHOME=/app/bin\nexport PYTHONPATH=/app/bin\nexec /app/bin/NovaReader \"$@\"\nLAUNCHER_EOF\n",
+                "chmod +x /app/bin/launcher.sh"
+            ],
+            "sources": [
+                {
+                    "type": "dir",
+                    "path": "."
+                }
+            ]
+        }
+    ]
+}
