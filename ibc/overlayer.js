@@ -124,11 +124,17 @@ export class Overlayer {
         return g
     }
     static highlight(rects, options = {}) {
-        const { color = 'red' } = options
+        const { color = 'red', opacity, blendMode } = options
         const g = createSVGElement('g')
         g.setAttribute('fill', color)
-        g.style.opacity = 'var(--overlayer-highlight-opacity, .3)'
-        g.style.mixBlendMode = 'var(--overlayer-highlight-blend-mode, normal)'
+        // Use the explicit opacity/blendMode passed in options when provided
+        // (e.g. from user TTS highlight settings); otherwise fall back to the
+        // CSS custom properties so other callers (manual highlights, etc.)
+        // keep their previous default behavior.
+        g.style.opacity = (opacity !== undefined && opacity !== null)
+            ? opacity
+            : 'var(--overlayer-highlight-opacity, .3)'
+        g.style.mixBlendMode = blendMode || 'var(--overlayer-highlight-blend-mode, normal)'
         for (const { left, top, height, width } of rects) {
             const el = createSVGElement('rect')
             el.setAttribute('x', left)

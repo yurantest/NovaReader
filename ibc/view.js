@@ -335,6 +335,18 @@ export class View extends HTMLElement {
         const tocItem = this.#tocProgress?.getProgress(index, range)
         const pageItem = this.#pageProgress?.getProgress(index, range)
         const cfi = this.getCFI(index, range)
+        // ── ВРЕМЕННАЯ ДИАГНОСТИКА (удалить после отладки) ──
+        try {
+            window.__novaLog?.('[DIAG #onRelocate]', 'info', {
+                reason, index,
+                rangeText: range?.toString?.()?.slice?.(0, 60),
+                rangeStartOffset: range?.startOffset,
+                tocItemLabel: tocItem?.label,
+                tocItemHref: tocItem?.href,
+                cfi,
+            })
+        } catch (e) {}
+        // ── КОНЕЦ ДИАГНОСТИКИ ──
         this.lastLocation = { ...progress, tocItem, pageItem, cfi, range }
         if (reason === 'snap' || reason === 'page' || reason === 'scroll')
             this.history.replaceState(cfi)

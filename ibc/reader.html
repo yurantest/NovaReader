@@ -90,7 +90,7 @@
             top: 0;
             left: 0;
             right: 0;
-            height: 48px;
+            height: var(--panel-height, 48px);
             background: rgba(32, 33, 36, 0.95);
             display: flex;
             align-items: center;
@@ -98,6 +98,7 @@
             gap: 8px;
             z-index: 1000;
             transition: transform 0.3s;
+            will-change: transform;
             color: white;
             border-bottom: 1px solid rgba(255,255,255,0.1);
         }
@@ -109,7 +110,7 @@
             bottom: 0;
             left: 0;
             right: 0;
-            height: 48px;
+            height: var(--panel-height, 48px);
             background: rgba(32, 33, 36, 0.95);
             display: flex;
             align-items: center;
@@ -117,6 +118,7 @@
             gap: 8px;
             z-index: 1000;
             transition: transform 0.3s;
+            will-change: transform;
             color: white;
             border-top: 1px solid rgba(255,255,255,0.1);
         }
@@ -126,8 +128,8 @@
         .icon-button {
             background: transparent;
             border: none;
-            width: 36px;
-            height: 36px;
+            width: calc(var(--panel-height, 48px) * 0.75);
+            height: calc(var(--panel-height, 48px) * 0.75);
             border-radius: 50%;
             display: flex;
             align-items: center;
@@ -141,7 +143,7 @@
         .icon-button:active { transform: scale(0.95); }
         .icon-button.primary { background: #1a73e8; }
         .icon-button.small { width: 32px; height: 32px; }
-        .icon-button .material-icons { font-size: 22px; }
+        .icon-button .material-icons { font-size: calc(var(--panel-height, 48px) * 0.458); }
 
         .book-info {
             flex: 1;
@@ -1068,14 +1070,15 @@
         <!-- Нижняя панель навигации -->
         <div class="bottom-nav" id="bottomNav">
             <button class="icon-button" id="prevPageBtn"><span class="material-icons">chevron_left</span></button>
-            <button class="icon-button" id="nextPageBtn"><span class="material-icons">chevron_right</span></button>
             <div class="page-info" id="pageInfo">0/0</div>
             <div class="page-info" id="progressInfo" style="min-width: 50px; text-align: center; color: #4caf50;">0%</div>
             <div style="flex: 1;"></div>
             <div style="display: flex; align-items: center; gap: 4px;">
+                <button class="icon-button" id="audioRecorderBtn" title="Записать главу в MP3"><span class="material-icons">mic</span></button>
                 <div class="tts-indicator" id="ttsIndicator"></div>
                 <button class="icon-button" id="ttsBtn"><span class="material-icons">headphones</span></button>
             </div>
+            <button class="icon-button" id="nextPageBtn"><span class="material-icons">chevron_right</span></button>
         </div>
 
         <!-- TTS панель настроек -->
@@ -1308,6 +1311,32 @@
     <script type="module">
         import { makeBook } from './view.js';
         import { Overlayer } from './overlayer.js';
+        import { applyReaderFont as _applyReaderFont } from './fonts.js';
+        import {
+            parseTtsRgba as _parseTtsRgba,
+            setTtsHighlightColor as _setTtsHighlightColor,
+            DEFAULT_TTS_HIGHLIGHT_COLOR,
+            DEFAULT_TTS_HIGHLIGHT_OPACITY,
+        } from './tts-highlight-color.js';
+        import {
+            getThemeCSS as _getThemeCSS,
+            injectEndOfBookMsg as _injectEndOfBookMsgImpl,
+            hideAdSections as _hideAdSectionsImpl,
+            hideFakeTOCLists as _hideFakeTOCListsImpl,
+            bgLuminance as _bgLuminanceImpl,
+        } from './theme-css.js';
+        import { renderToc as _renderTocImpl, filterToc } from './toc.js';
+        import { escHtml, findTextRange, findTextInDoc, highlightFoundText } from './dom-text-utils.js';
+        import {
+            initBookmarksHighlights,
+            loadBookmarks, renderBookmarks, toggleBookmark, addCurrentBookmark,
+            addBookmarkWithText, updateBookmarkButton, showToast,
+            loadHighlights, applyHighlightsForCurrentSection,
+            findHighlightForCurrentSelection, updateHighlightButtonIcon,
+            deleteCurrentHighlight,
+            openNoteDialog, closeNoteDialog, saveNoteFromDialog,
+            renderHighlightsPanel, setHighlightsFilter, getHighlightsFilter,
+        } from './bookmarks-highlights.js';
 
         window.makeBook = makeBook;
 
@@ -1361,7 +1390,10 @@
         let currentVoice = 'ru_RU_irina_medium';
         let ttsPageTurning = false;     // флаг: идёт перелистывание / переход секции
         let ttsSuppressScroll = false;  // флаг: не двигать страницу при первом предложении
-        let ttsSplitFlipTimer = null;   // таймер умного листания для split-предложений
+        let ttsSplitFlipTimer = null;   // УСТАРЕЛО: раньше — таймер листания по проценту/word-timings.
+                                        // Больше не используется для планирования листания (см.
+                                        // «виртуальное тире» в speakCurrentSentence/window.ttsNext) —
+                                        // оставлено только как безопасный no-op sink для старых clearTimeout().
         let ttsLastPcmDurationMs = 0;   // точная длительность (мс) от Python PCM; 0 = неизвестна
         let lastRelocateRange = null;   // Range начала видимой области из последнего relocate
         let pendingTTSStart = null;     // флаг: TTS ждёт готовности книги
@@ -1378,9 +1410,13 @@
 
         // ID текущей TTS подсветки
         let currentTTSHighlightId = null;
-        
-        // Цвет TTS-подсветки (настраивается через Python)
-        let ttsHighlightColor = '#00CED1'; // По умолчанию — голубой
+
+        // Цвет TTS-подсветки (настраивается через Python).
+        // Источник истины — модуль ./tts-highlight-color.js; эти переменные
+        // держат локальную копию, чтобы не переписывать все места по файлу,
+        // где ttsHighlightColor/ttsHighlightOpacity читаются напрямую.
+        let ttsHighlightColor = DEFAULT_TTS_HIGHLIGHT_COLOR;
+        let ttsHighlightOpacity = DEFAULT_TTS_HIGHLIGHT_OPACITY;
         let lastTtsCfi = null;         // CFI последнего озвученного предложения (для возврата)
         let lastTtsSectionIndex  = -1;   // Секция в которой идёт TTS (для проверки смены главы)
         let ttsUserNavigated     = false; // true если пользователь вручную листнул во время TTS
@@ -1388,6 +1424,33 @@
         let lastTtsRange = null;       // Range последнего озвученного предложения
         let lastTtsSentenceText = null; // Текст последнего предложения (для поиска в новом DOM)
         let ttsHighlightColorName = 'cyan';
+
+        // Тонкая обёртка над parseTtsRgba из tts-highlight-color.js — оставлена
+        // с тем же именем, чтобы не менять вызовы по всему файлу.
+        function parseTtsRgba(rgbaStr) {
+            return _parseTtsRgba(rgbaStr);
+        }
+
+        // Применяет новый цвет+прозрачность (делегируя хранение состояния в
+        // tts-highlight-color.js) и, если подсветка сейчас активна,
+        // перерисовывает её немедленно с новыми параметрами.
+        function applyTtsHighlightColor(colorHex, opacity) {
+            const applied = _setTtsHighlightColor(colorHex, opacity);
+            ttsHighlightColor = applied.color;
+            ttsHighlightOpacity = applied.opacity;
+            if (overlayer && currentTTSHighlightId && lastTtsRange) {
+                try {
+                    const id = currentTTSHighlightId;
+                    overlayer.remove(id);
+                    overlayer.add(id, lastTtsRange, Overlayer.highlight, {
+                        color: ttsHighlightColor,
+                        opacity: ttsHighlightOpacity,
+                    });
+                } catch(e) {
+                    log(' Ошибка обновления цвета TTS-подсветки: ' + e.message, 'error');
+                }
+            }
+        }
         
         // Хранилище пользовательских подсветок: {pythonId: overlayerId}
         const userHighlightMap = {};
@@ -1437,6 +1500,11 @@
 
             console.log(`[${type}] ${msg}`, data || '');
         }
+        // Даёт отдельным ES-модулям (view.js, paginator.js и т.п.) писать в
+        // ту же систему логов/debug.log, что и сам reader.html - иначе их
+        // console.log никогда не попадёт в панель отладки/debug.log,
+        // только в консоль DevTools браузера, которая обычно не открыта.
+        window.__novaLog = log;
 
         function renderLogs() {
             if (!debugEl) return;
@@ -1652,6 +1720,7 @@
                 } catch(e) {}
                 // Скрываем рекламные секции (Nota bene, реклама пиратских сайтов)
                 try { hideAdSections(doc); } catch(e) {}
+                try { hideFakeTOCLists(doc); } catch(e) {}
             });
 
             view.addEventListener('create-overlay', () => {
@@ -1688,6 +1757,13 @@
                 doc.addEventListener('mousemove', () => {
                     if (bridge?.onMouseMove) bridge.onMouseMove();
                 }, { passive: true });
+                // Каждая секция рендерится в НОВОМ iframe со своим document —
+                // document.fonts главной страницы туда не «протекает». Поэтому
+                // при каждой загрузке секции регистрируем в iframe.document.fonts
+                // те же FontFace, что уже загружены на главной странице (fonts.js
+                // кеширует сами ArrayBuffer через объекты FontFace — здесь только
+                // копируем ссылки, повторной загрузки файла с диска не происходит).
+                try { window.__registerFontsInDoc?.(doc); } catch(e) {}
                 // Повторно применяем стили т.к. новый iframe = чистый document
                 setTimeout(() => applyTheme(), 0);
                 if (!doc) return;
@@ -1780,7 +1856,7 @@
                                 });
 
                                 // Обновляем иконку кнопки подсветки
-                                updateHighlightButtonIcon();
+                                updateHighlightButtonIcon(currentSelection);
                             } else {
                                 document.getElementById('selectionToolbar').classList.remove('visible');
                                 document.getElementById('miniPalette').classList.remove('visible');
@@ -1904,6 +1980,16 @@
                 }
                 // Сохраняем на каждый relocate (включая смен страницы внутри секции)
                 autoSavePosition();
+                // Подсветка текущего пункта оглавления — тоже на каждый
+                // relocate, а не только при ручном вызове из tocNavigate().
+                // lastLocation.tocItem к этому моменту уже гарантированно
+                // актуален (view.js выставляет его синхронно ДО отправки
+                // самого события relocate), так что тут нет гонки со
+                // временем, в отличие от вызова с setTimeout из
+                // конкретного места навигации. Это же чинит подсветку и
+                // для остальных способов навигации (поиск, TTS, кнопки
+                // назад/вперёд), не только для клика по оглавлению.
+                try { highlightCurrentTocItem(); } catch(e) {}
             });
 
             // Подключаем WebChannel
@@ -2335,219 +2421,25 @@
             fontsBaseUrl: '',  // абсолютный file:// URL папки fonts/ (для Windows)
         };
 
-        // Генерирует CSS строку для инжекции в iframe (аналог getCSS в reader.js)
+        // Генерирует CSS строку для инжекции в iframe (аналог getCSS в reader.js).
+        // Реализация вынесена в theme-css.js — themeSettings передаётся явно.
         function getThemeCSS() {
-            // Генерируем @font-face — по одной записи на каждый файл шрифта.
-            // Статические: font-weight: конкретный вес из OS/2.
-            // Вариативные: font-weight: min max из fvar.
-            let fontFaceCSS = '';
-            const faces = themeSettings.fontFaces || [];
-            const baseUrl = themeSettings.fontsBaseUrl || '../fonts/';
-            for (const info of faces) {
-                const fmt = info.file.endsWith('.otf')   ? 'opentype'
-                          : info.file.endsWith('.woff2') ? 'woff2'
-                          : info.file.endsWith('.woff')  ? 'woff'
-                          : 'truetype';
-                const faceName = info.display_name || info.family;
-                // Используем абсолютный file_url если есть (шрифты из ~/.config/NovaReader/fonts/)
-                // иначе строим URL из базовой папки (шрифты из ibc/fonts/)
-                const fontSrc = info.file_url || (baseUrl + info.file);
-                const wRange = info.variable
-                    ? `${info.wght_min} ${info.wght_max}`
-                    : `${info.weight || info.wght_min}`;
-                fontFaceCSS += `
-                @font-face {
-                    font-family: '${faceName}';
-                    src: url('${fontSrc}') format('${fmt}');
-                    font-weight: ${wRange};
-                    font-style: ${info.style || 'normal'};
-                    font-display: swap;
-                }\n`;
-            }
-
-            // font-variation-settings для выбранного шрифта (если вариативный)
-            const selFace = faces.find(f => f.family === themeSettings.fontFamily && f.variable);
-            const bodyVarSettings = selFace ? `font-variation-settings: 'wght' 400;` : '';
-
-            return fontFaceCSS + `
-                html, body {
-                    color: ${themeSettings.text} !important;
-                    background: ${themeSettings.bg} !important;
-                    margin: 0 !important;
-                    -webkit-font-smoothing: antialiased !important;
-                    -moz-osx-font-smoothing: grayscale !important;
-                    text-rendering: optimizeLegibility !important;
-                    padding: 0 !important;
-                }
-                p, li, blockquote, dd, span, a {
-                    color: ${themeSettings.text} !important;
-                    font-size: ${themeSettings.fontSize}px;
-                    line-height: ${themeSettings.lineHeight};
-                    font-family: '${themeSettings.fontFamily}', Georgia, serif !important;
-                    ${bodyVarSettings}
-                }
-                h1, h2, h3, h4, h5, h6 {
-                    color: ${themeSettings.text} !important;
-                    font-family: '${themeSettings.fontFamily}', Georgia, serif !important;
-                    text-align: center !important;
-                    background: transparent !important;
-                    margin: 1em 0 !important;
-                    padding: 0 !important;
-                    border: none !important;
-                }
-                a { color: inherit !important; }
-                * {
-                    background-color: transparent !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                }
-                /* Убираем все рамки */
-                * {
-                    border: none !important;
-                    outline: none !important;
-                    box-shadow: none !important;
-                }
-                /* Сохраняем фон только у body */
-                html, body {
-                    background: ${themeSettings.bg} !important;
-                }
-                /* Особые стили для EPUB элементов */
-                body > * {
-                    background: transparent !important;
-                }
-                img {
-                    max-width: 100%;
-                    height: auto;
-                }
-
-                /* ── Скрываем рекламные секции пиратских сайтов ─────────────
-                   Nota bene, «от пирата» и подобные секции определяются по
-                   заголовку через CSS :has() и attribute selectors.
-                   Для EPUB: section/div содержащий <h1-h6> с текстом "Nota bene".
-                   Для FB2 (конвертированного): аналогично.
-                   Используем display:none чтобы секция не занимала место. */
-
-                /* EPUB: section или div чей первый заголовок = "Nota bene" */
-                section:has(> h1:first-child),
-                section:has(> h2:first-child),
-                section:has(> h3:first-child),
-                div:has(> h1:first-child),
-                div:has(> h2:first-child) {
-                    /* Применяется только через JS ниже — здесь заготовка */
-                }
-            `;
+            return _getThemeCSS(themeSettings);
         }
 
         // Скрывает рекламные секции в загруженном документе iframe.
         // Вызывается после загрузки каждой секции.
         // CSS :has() не всегда доступен в старых WebEngine — используем JS.
         function _injectEndOfBookMsg(doc) {
-            // Уже вставлено
-            if (doc.getElementById('nova-end-of-book')) return;
-            const lang = document.documentElement.lang ||
-                         navigator.language || 'ru';
-            const msg  = lang.startsWith('en') ? 'End of book' : 'Конец книги';
-            const div  = doc.createElement('div');
-            div.id = 'nova-end-of-book';
-            const _fontFamily = (typeof themeSettings !== 'undefined' && themeSettings.fontFamily)
-                ? `'${themeSettings.fontFamily}', Georgia, serif`
-                : 'inherit';
-            div.style.cssText = [
-                'display:flex', 'align-items:center', 'justify-content:center',
-                'height:80vh', 'width:100%',
-                `font-family:${_fontFamily}`,
-                'font-size:1.6em', 'opacity:0.45',
-                'font-style:italic', 'letter-spacing:0.05em',
-                'color:var(--text-color, inherit)',
-                'pointer-events:none', 'user-select:none',
-            ].join(';');
-            div.textContent = '— ' + msg + ' —';
-            // Скрываем весь body и ставим только надпись
-            Array.from(doc.body.children).forEach(el => { el.style.display = 'none'; });
-            doc.body.appendChild(div);
+            _injectEndOfBookMsgImpl(doc, themeSettings?.fontFamily);
         }
 
         function hideAdSections(doc) {
-            if (!doc?.body) return;
+            _hideAdSectionsImpl(doc, themeSettings?.fontFamily, log);
+        }
 
-            // ── Фильтр по заголовку секции ────────────────────────────────
-            const HIDDEN_TITLES = [
-                'nota bene', 'note bene', 'notabene',
-                'от пирата', 'от пиратов', 'реклама',
-            ];
-
-            // ── Фильтр по тексту внутри секции ────────────────────────────
-            // Некоторые пиратские книги не имеют заголовка "Nota bene" —
-            // реклама идёт просто как обычный текст в последней секции.
-            // Определяем по характерным фразам внутри абзацев.
-            const HIDDEN_CONTENT = [
-                'searchfloor.org',
-                'цокольным этажом',
-                'цокольный этаж',
-                'книга предоставлена',
-                'сайт заблокирован в России',
-                'наградите автора лайком',
-                'telegram-бот',
-                'антизапрет',
-                'censor tracker',
-            ];
-
-            // Скрыть контейнер элемента
-            function hideContainer(el, reason) {
-                let parent = el.parentElement;
-                while (parent && parent !== doc.body) {
-                    const tag = parent.tagName?.toLowerCase();
-                    if (tag === 'section' || tag === 'div' || tag === 'article') {
-                        parent.style.display = 'none';
-                        log(`[AdFilter] Скрыта секция по: "${reason}"`, 'info');
-                        return true;
-                    }
-                    parent = parent.parentElement;
-                }
-                // Нет контейнера — скрываем сам элемент и всё после него
-                let sibling = el;
-                while (sibling) {
-                    sibling.style.display = 'none';
-                    sibling = sibling.nextElementSibling;
-                }
-                return true;
-            }
-
-            // 1. Фильтр по заголовку
-            const headings = doc.querySelectorAll('h1,h2,h3,h4,h5,h6,p.title,title');
-            let wholeDocHidden = false;
-            headings.forEach(h => {
-                const text = h.textContent?.trim().toLowerCase() ?? '';
-                if (HIDDEN_TITLES.some(s => text === s || text.startsWith(s))) {
-                    hideContainer(h, h.textContent?.trim());
-                    wholeDocHidden = true;
-                }
-            });
-            if (wholeDocHidden) { _injectEndOfBookMsg(doc); return; }
-
-
-            // 2. Фильтр по содержимому абзацев
-            // Ищем абзацы с характерными фразами пиратских сайтов.
-            // Чтобы не скрывать случайные упоминания — требуем совпадения
-            // хотя бы 2 фраз в одной секции, или 1 очень специфичной.
-            const STRONG_MATCH = ['searchfloor.org', 'цокольным этажом', 'цокольный этаж'];
-            const paragraphs = doc.querySelectorAll('p, div');
-            paragraphs.forEach(p => {
-                if (p.style.display === 'none') return; // уже скрыт
-                const text = p.textContent?.toLowerCase() ?? '';
-                // Сильное совпадение — скрываем сразу
-                if (STRONG_MATCH.some(s => text.includes(s))) {
-                    hideContainer(p, text.substring(0, 40));
-                    _injectEndOfBookMsg(doc);
-                    return;
-                }
-                // Слабые совпадения — считаем сколько фраз нашли
-                const matches = HIDDEN_CONTENT.filter(s => text.includes(s));
-                if (matches.length >= 2) {
-                    hideContainer(p, matches.join(', '));
-                    _injectEndOfBookMsg(doc);
-                }
-            });
+        function hideFakeTOCLists(doc) {
+            _hideFakeTOCListsImpl(doc, log);
         }
 
         // Применяет тему через renderer.setStyles — единственный правильный способ
@@ -2556,14 +2448,7 @@
          * Использует формулу W3C WCAG 2.0.
          */
         function _bgLuminance(hex) {
-            try {
-                const h = hex.replace('#', '');
-                const r = parseInt(h.substring(0, 2), 16) / 255;
-                const g = parseInt(h.substring(2, 4), 16) / 255;
-                const b = parseInt(h.substring(4, 6), 16) / 255;
-                const toLinear = c => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-                return 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b);
-            } catch(e) { return 0.5; }
+            return _bgLuminanceImpl(hex);
         }
 
         /** Обновляет CSS-переменные цвета TTS-кнопок под текущую тему. */
@@ -2584,11 +2469,61 @@
             }
         }
 
+        // ── Пользовательские шрифты через FontFace API (fonts.js) ──────────
+        // themeSettings.fontFaces/fontsBaseUrl остаются в getThemeCSS() только
+        // для обратной совместимости (getThemeCSS() их больше не использует
+        // для @font-face — см. theme-css.js, где @font-face блок для этого
+        // сценария больше не нужен, т.к. загрузка идёт через FontFace API).
+        window.__lastFontMap = window.__lastFontMap || [];
+
+        // Вызывается из applyAllSettings() и из applySettingFromPython()
+        // при смене шрифта. Инкапсулирует передачу колбэка, который меняет
+        // themeSettings.fontFamily и запускает applyTheme() — сама загрузка
+        // и перепагинация с сохранением позиции происходят внутри fonts.js.
+        window.__applyFontFromSettings = async function (selectedDisplayName) {
+            if (!selectedDisplayName || !window.__lastFontMap?.length) return false;
+            const applyCssFn = (family) => {
+                themeSettings.fontFamily = family;
+                applyTheme();
+            };
+            return await _applyReaderFont(
+                view, window.__lastFontMap, selectedDisplayName, applyCssFn, log
+            );
+        };
+
+        // Точка входа для Python (settings_window.py вызывает это напрямую
+        // при смене шрифта в настройках, передавая свежий font_faces).
+        window.applyReaderFont = async function (fontMapJson, selectedDisplayName) {
+            try {
+                const fontMap = typeof fontMapJson === 'string' ? JSON.parse(fontMapJson) : fontMapJson;
+                window.__lastFontMap = fontMap;
+                return await window.__applyFontFromSettings(selectedDisplayName);
+            } catch (e) {
+                log(' applyReaderFont: ошибка — ' + e.message, 'error');
+                return false;
+            }
+        };
+
         function applyTheme() {
             if (view?.renderer?.setStyles) {
                 view.renderer.setStyles(getThemeCSS());
                 log(' Тема применена через renderer.setStyles', 'tts');
             }
+            // Подстраховка: если шрифт/размер/интервал сменились ПОКА текущее
+            // предложение уже озвучивается, его закэшированное isSplitSentence/
+            // parts/breakIdx посчитаны по старой геометрии и больше не валидны —
+            // сбрасываем, чтобы speakCurrentSentence() пересчитал разрез заново
+            // при следующем обращении к этому же предложению (например, при
+            // повторном проигрывании транша после паузы/prev).
+            try {
+                const s = ttsSentences?.[ttsSentenceIndex];
+                if (s && s.isSplitSentence !== undefined) {
+                    delete s.isSplitSentence;
+                    delete s.parts;
+                    delete s.partIndex;
+                    log(' applyTheme: сброшен кэш разрыва текущего предложения (геометрия изменилась)', 'tts');
+                }
+            } catch(e) {}
             // Применяем фон к главной странице
             document.documentElement.style.setProperty('--bg-color', themeSettings.bg);
             document.documentElement.style.setProperty('--text-color', themeSettings.text);
@@ -2607,12 +2542,25 @@
             if (s.theme_text)  themeSettings.text = s.theme_text;
             if (s.font_size)   themeSettings.fontSize = parseInt(s.font_size);
             if (s.line_height) themeSettings.lineHeight = parseFloat(s.line_height);
-            if (s.reader_font_family) themeSettings.fontFamily = s.reader_font_family;
             if (s.font_faces) themeSettings.fontFaces = s.font_faces;
             if (s.fonts_base_url) themeSettings.fontsBaseUrl = s.fonts_base_url;
+            // Пользовательский шрифт грузится ТОЛЬКО через FontFace API (fonts.js) —
+            // themeSettings.fontFamily больше не выставляется здесь напрямую,
+            // это делает applyCssFn внутри applyReaderFont() после успешной
+            // загрузки нужного семейства (см. window.__applyFontFromSettings ниже).
+            if (s.reader_font_family && s.font_faces) {
+                window.__lastFontMap = s.font_faces;
+                window.__applyFontFromSettings(s.reader_font_family);
+            } else if (s.reader_font_family) {
+                // Фолбэк на случай, если font_faces почему-то не пришли —
+                // остаёмся на старом поведении, чтобы не остаться совсем
+                // без шрифта.
+                themeSettings.fontFamily = s.reader_font_family;
+            }
             if (s.spread_mode && view?.renderer) view.renderer.setAttribute('spread', s.spread_mode);
             if (s.tts_word_mode !== undefined) ttsWordMode = !!s.tts_word_mode;
             if (s.page_margin !== undefined) applyPageMargin(s.page_margin);
+            if (s.panel_height !== undefined) applyPanelHeight(s.panel_height);
             if (s.default_highlight_style) {
                 currentStyle = s.default_highlight_style;
                 log(` Стиль подсветки: ${currentStyle}`, 'settings');
@@ -2621,8 +2569,16 @@
             }
             // default_highlight_color больше не используется (оставлен только для совместимости)
 
-            // Применяем цвет TTS-подсветки
-            if (s.tts_highlight_color) {
+            // Применяем цвет TTS-подсветки — Python присылает готовую rgba() строку
+            // с реальным пользовательским hex-цветом и прозрачностью.
+            if (s.tts_highlight_color_rgba) {
+                const parsed = parseTtsRgba(s.tts_highlight_color_rgba);
+                if (parsed) {
+                    applyTtsHighlightColor(parsed.color, parsed.opacity);
+                    log(` TTS цвет (rgba) применён: ${parsed.color}, прозрачность ${parsed.opacity}`, 'settings');
+                }
+            } else if (s.tts_highlight_color) {
+                // Обратная совместимость со старым форматом (имя цвета без rgba)
                 ttsHighlightColorName = s.tts_highlight_color;
                 const ttsColorMap = {
                     'cyan': '#00CED1',
@@ -2685,12 +2641,15 @@
         window.applySettingFromPython = function(key, value) {
             switch(key) {
                 case 'reader_font_family':
-                    themeSettings.fontFamily = value;
-                    applyTheme();
+                    // Загрузка через FontFace API (fonts.js) — themeSettings.fontFamily
+                    // выставится изнутри applyReaderFont() ПОСЛЕ успешной загрузки
+                    // нужного семейства, не раньше (иначе пагинация посчитается
+                    // по fallback-шрифту).
+                    window.__applyFontFromSettings(value);
                     break;
                 case 'font_faces':
                     themeSettings.fontFaces = value;
-                    applyTheme();
+                    window.__lastFontMap = value;
                     break;
                 case 'font_size':
                     themeSettings.fontSize = parseInt(value);
@@ -2710,14 +2669,27 @@
                 case 'page_margin':
                     applyPageMargin(value);
                     break;
+                case 'panel_height':
+                    applyPanelHeight(value);
+                    break;
                 case 'default_highlight_style':
                     currentStyle = value;
                     break;
                 case 'default_highlight_color':
                     currentColor = value;
                     break;
+                case 'tts_highlight_color_rgba':
+                    // Готовая rgba() строка из Python (реальный пользовательский цвет+прозрачность)
+                    {
+                        const parsed = parseTtsRgba(value);
+                        if (parsed) {
+                            applyTtsHighlightColor(parsed.color, parsed.opacity);
+                            log(` Цвет/прозрачность TTS-подсветки изменены (rgba): ${parsed.color}, ${parsed.opacity}`, 'tts');
+                        }
+                    }
+                    break;
                 case 'tts_highlight_color':
-                    // Применяем цвет TTS-подсветки из Python
+                    // Обратная совместимость со старым форматом (имя цвета)
                     ttsHighlightColorName = value;
                     // Преобразуем имя цвета в hex код
                     const ttsColorMap = {
@@ -2727,7 +2699,7 @@
                         'yellow': '#fdd66b',
                         'pink': '#ff8b8b',
                     };
-                    ttsHighlightColor = ttsColorMap[value] || '#00CED1';
+                    applyTtsHighlightColor(ttsColorMap[value] || '#00CED1');
                     log(` Цвет TTS-подсветки изменён: ${value} (${ttsHighlightColor})`, 'tts');
                     break;
                 case 'theme':
@@ -2749,6 +2721,188 @@
         window.setPageMargin = v => applyPageMargin(v);
         window.updateHighlightStyle = v => { currentStyle = v; };
         window.updateHighlightColor = v => { currentColor = v; };
+
+        // ══════════════════════════════════════════════════════════════
+        //  ИЗВЛЕЧЕНИЕ ГЛАВ ДЛЯ АУДИОКНИГИ
+        // ══════════════════════════════════════════════════════════════
+        // Проходит по book.toc, для каждого пункта резолвит секцию через
+        // book.resolveHref() и извлекает её текст через createDocument() —
+        // это работает ОФФ-ЭКРАННО (не через видимый view.renderer), поэтому
+        // никак не связано с постраничной вёрсткой/«виртуальным тире»
+        // (getSplitAcrossPageInfo) — та логика только про то, как ЧИТАЕТСЯ
+        // и ПОДСВЕЧИВАЕТСЯ уже отрисованный на экране текст при постраничном
+        // перелистывании, а не про извлечение самого текста секции.
+        // Рекламные вставки пиратских сайтов вырезаются той же функцией
+        // hideAdSections(), что уже применяется к видимым секциям при чтении.
+        window.extractChaptersForAudiobook = async function() {
+            if (!book?.toc || !book?.sections) {
+                bridge?.onChaptersExtracted?.(JSON.stringify({ error: 'no_toc' }));
+                return;
+            }
+            try {
+                // Плоский список пунктов TOC (без вложенной иерархии — для
+                // аудиокниги порядок глав важнее структуры «часть/подглава»,
+                // а фильтрация рекламных секций уже покрыта filterToc()).
+                function flattenToc(items, depth = 0) {
+                    let out = [];
+                    for (const item of items) {
+                        out.push({ label: item.label, href: item.href, depth });
+                        if (item.subitems?.length) {
+                            out = out.concat(flattenToc(item.subitems, depth + 1));
+                        }
+                    }
+                    return out;
+                }
+                const flatToc = flattenToc(filterToc(book.toc));
+
+                // metadata.title у EPUB не всегда простая строка — если у
+                // книги есть название на нескольких языках (alternate-script
+                // в OPF), парсер (epub.js) возвращает "языковую карту"
+                // {ru: "...", en: "..."} вместо строки. Разворачиваем её в
+                // обычный текст, иначе в TTS/имя файла уходит JSON-объект.
+                const langMapToText = (v) => {
+                    if (!v) return '';
+                    if (typeof v === 'string') return v;
+                    if (typeof v === 'object') {
+                        const lang = (book.metadata?.language?.[0] || '').split('-')[0];
+                        for (const k of Object.keys(v)) {
+                            if (k.split('-')[0].toLowerCase() === lang.toLowerCase()) return v[k];
+                        }
+                        const vals = Object.values(v);
+                        return vals.length ? String(vals[0]) : '';
+                    }
+                    return String(v);
+                };
+
+                // Заголовок книги — для распознавания титульной секции (когда
+                // первый пункт TOC — это просто «Название / Автор», а не
+                // настоящая глава). Такую секцию не делаем отдельным
+                // MP3-файлом — её текст присоединяется к первой выбранной
+                // главе (см. AudioRecorderWindow._start_record).
+                const bookTitleText = langMapToText(book.metadata?.title);
+                const bookTitleNorm = bookTitleText.trim().toLowerCase();
+
+                // Метки, по которым распознаём аннотацию и концевые сноски
+                // (расшифровки/пояснения к сноскам в конце книги) — такие
+                // главы извлекаются (пользователь видит их в списке и может
+                // включить вручную), но по умолчанию НЕ отмечены галочкой.
+                const RE_ANNOTATION = /^(аннотаци|annotation)/i;
+                const RE_ENDNOTES = /^(примечани|сноск|коммент|note|footnote|endnote)/i;
+                // Метки типовых титульных/обложечных секций EPUB/FB2 и
+                // прочих форматов — распознаём титульную секцию по метке
+                // TOC, а не только по совпадению текста с названием книги
+                // (в EPUB метка TOC обычно "Cover"/"Title Page"/"Обложка",
+                // а не сам текст названия).
+                const RE_TITLEPAGE_LABEL = /^(титул|обложк|cover|title\s*page|titlepage|halftitle|frontispiece)/i;
+
+                const chapters = [];
+                const seenSectionIndexes = new Set();
+
+                for (const item of flatToc) {
+                    if (!item.href) continue;
+                    let resolved;
+                    try {
+                        resolved = await book.resolveHref(item.href);
+                    } catch(e) { continue; }
+                    const sectionIndex = resolved?.index;
+                    if (sectionIndex === undefined || sectionIndex === null) continue;
+                    // Несколько пунктов TOC (например, подглавы) могут указывать
+                    // на одну и ту же секцию через якоря (#fragment) — берём
+                    // текст секции только один раз, на первый пункт, который
+                    // на неё ссылается, иначе текст будет продублирован в
+                    // нескольких «главах» аудиокниги.
+                    if (seenSectionIndexes.has(sectionIndex)) continue;
+                    seenSectionIndexes.add(sectionIndex);
+
+                    const section = book.sections[sectionIndex];
+                    if (!section) continue;
+
+                    let text = '';
+                    try {
+                        if (section.createDocument) {
+                            const doc = await section.createDocument();
+                            // Убираем рекламные вставки пиратских сайтов —
+                            // та же функция, что чистит видимые секции при чтении.
+                            try { hideAdSections(doc); } catch(e) {}
+                            try { hideFakeTOCLists(doc); } catch(e) {}
+                try { hideFakeTOCLists(doc); } catch(e) {}
+                            text = stripFootnoteMarkers((doc.body?.textContent ?? '').replace(/\s+/g, ' ').trim());
+                        } else if (section.getPlainText) {
+                            text = stripFootnoteMarkers(section.getPlainText().replace(/\s+/g, ' ').trim());
+                        }
+                    } catch(e) {
+                        log(` extractChaptersForAudiobook: секция ${sectionIndex} — ошибка извлечения: ${e.message}`, 'warn');
+                        continue;
+                    }
+
+                    if (!text) continue; // пустая секция (например, титульный лист без текста)
+
+                    const label = (item.label || '').trim();
+                    const labelNorm = label.toLowerCase();
+                    // Титульная секция: первый пункт TOC, текст короткий и
+                    // совпадает (или почти совпадает) с названием книги —
+                    // типично «Название\nАвтор» на отдельной странице.
+                    const titleMatches = bookTitleNorm.length > 3 && (
+                        labelNorm.includes(bookTitleNorm) ||
+                        bookTitleNorm.includes(labelNorm) ||
+                        text.toLowerCase().includes(bookTitleNorm)
+                    );
+                    const isTitlePage = chapters.length === 0 && text.length < 500 &&
+                        (titleMatches || RE_TITLEPAGE_LABEL.test(labelNorm));
+                    const isAnnotation = RE_ANNOTATION.test(labelNorm);
+                    const isEndNotes = RE_ENDNOTES.test(labelNorm);
+                    // Эпиграф/стих перед главой или частью (например «Ворон» перед
+                    // главой 1 у Сапковского): короткий текст (обычно стихотворная
+                    // форма), метка TOC либо пустая/безликая («—», номер), либо
+                    // явно указывает на эпиграф/стихотворение — а не на «Главу N».
+                    // Такие вставки не публикуются отдельным файлом, а
+                    // приклеиваются к началу СЛЕДУЮЩЕЙ обычной главы.
+                    const RE_EPIGRAPH_LABEL = /^(эпиграф|epigraph|стих|poem|пролог\s*в\s*стихах)/i;
+                    const RE_PART_LABEL = /^(часть|part|раздел)\s*\S/i;
+                    const isPartHeading = RE_PART_LABEL.test(labelNorm) && !/глава|chapter/i.test(labelNorm);
+                    const looksLikeChapterLabel = /(глава|часть|chapter|part|раздел|книга\s+\S)/i.test(labelNorm);
+                    // Короткая вставка (обычно стихотворная форма — эпиграф) с
+                    // меткой TOC, НЕ похожей на «Глава/Часть N»: даже если сама
+                    // метка — это просто первая строка стиха (не пустая и не
+                    // безликая), всё равно считаем эпиграфом, а не главой.
+                    const isEpigraph = !isTitlePage && !isAnnotation && !isEndNotes &&
+                        !looksLikeChapterLabel && text.length < 700 &&
+                        (RE_EPIGRAPH_LABEL.test(labelNorm) ||
+                         !label || label.length < 3 ||
+                         /^[\d.\s—-]*$/.test(label) ||
+                         label.length < text.length * 0.9);
+
+                    chapters.push({
+                        title: item.label || `Глава ${chapters.length + 1}`,
+                        sectionIndex,
+                        depth: item.depth,
+                        text,
+                        charCount: text.length,
+                        isTitlePage,
+                        isPartHeading,
+                        isEpigraph,
+                        skipByDefault: isAnnotation || isEndNotes,
+                    });
+                }
+
+                // Эпиграфы к записи не приклеиваем и не включаем вообще —
+                // только «Название книги. Автор» + текст самой главы.
+                // Отдельным файлом не публикуются и в текст соседней главы
+                // не встраиваются (раньше приклеивались — при разборе оказалось,
+                // что для разных книг это давало неровный, непредсказуемый
+                // результат; надёжнее просто выбросить их из списка).
+                const chaptersNoEpigraph = chapters.filter(ch => !ch.isEpigraph);
+                chapters.length = 0;
+                chapters.push(...chaptersNoEpigraph);
+
+                log(` extractChaptersForAudiobook: извлечено ${chapters.length} глав`, 'info');
+                bridge?.onChaptersExtracted?.(JSON.stringify({ chapters, bookTitle: bookTitleText }));
+            } catch(e) {
+                log(' extractChaptersForAudiobook: ошибка: ' + e.message, 'error');
+                bridge?.onChaptersExtracted?.(JSON.stringify({ error: e.message }));
+            }
+        };
+
         // Показываем/скрываем кнопку отладки по режиму разработчика
         window.setDevMode = (enabled) => {
             const btn = document.getElementById('debugBtn');
@@ -2760,6 +2914,14 @@
                 view.renderer.style.setProperty('--_margin', px + 'px');
             }
             document.documentElement.style.setProperty('--page-margin', px + 'px');
+        }
+
+        function applyPanelHeight(px) {
+            // Толщина верхней/нижней панели (Настройки -> Тема). Иконки и
+            // сам текст иконок внутри .icon-button пересчитываются
+            // автоматически через calc(var(--panel-height)) в CSS —
+            // здесь достаточно поменять одну переменную.
+            document.documentElement.style.setProperty('--panel-height', px + 'px');
         }
 
         // ── АВТОСОХРАНЕНИЕ ПОЗИЦИИ (CFI) ──
@@ -2790,8 +2952,22 @@
             const { section, cfi } = _pendingSavePos;
             _pendingSavePos = null;
             const pos = JSON.stringify({ section, cfi });
-            const progress = section / Math.max(1, (book?.sections?.length || 1) - 1);
-            bridge.savePosition(pos, Math.min(1, progress));
+            // ВАЖНО: прогресс для библиотеки берём из того же loc.fraction,
+            // что показывает сама читалка (progressInfo, updatePageInfo()) —
+            // это доля по факту прочитанного текста, а не по номеру секции.
+            // Старая формула "section / totalSections" считала прогресс по
+            // числу секций EPUB, а не по объёму текста: у книг с малым
+            // числом крупных глав вперемешку с мелкими техническими
+            // секциями (обложка, титул, содержание, копирайт — тоже
+            // отдельные секции) это давало сильно завышенный процент —
+            // например, 35% в библиотеке при факте ~1% прочитанного текста.
+            const loc = view?.lastLocation;
+            let progress = loc?.fraction;
+            if (typeof progress !== 'number' || Number.isNaN(progress)) {
+                // Фолбэк на старую формулу — только если fraction недоступен.
+                progress = section / Math.max(1, (book?.sections?.length || 1) - 1);
+            }
+            bridge.savePosition(pos, Math.min(1, Math.max(0, progress)));
             log(` Позиция: секция ${section + 1}, CFI=${cfi ? cfi.substring(0, 40) + '...' : 'нет'}`, 'nav');
         }
 
@@ -2823,142 +2999,48 @@
 
         // ── Helpers ──────────────────────────────────────────────────
         async function tocNavigate(href) {
-            if (!href || !book?.resolveHref) return;
+            if (!href) return;
             try {
-                const result = await book.resolveHref(href);
-                if (result?.index !== undefined) { view.goTo(result.index); toggleToc(); setTimeout(() => loadHighlights(), 300); }
-            } catch(e) {}
+                // view.goTo(href) - строкой, НЕ book.resolveHref(href).index -
+                // тогда resolveNavigation() внутри view.js сам вызовет
+                // book.resolveHref(href) и передаст renderer.goTo() сразу И
+                // index, И anchor вместе. Это тот же путь, что использует
+                // сам пагинатор для scrollToAnchor()/scrollToRect() - с
+                // учётом постраничной вёрстки, а не нативный
+                // element.scrollIntoView(), который эту вёрстку не видит.
+                //
+                // Раньше здесь сначала звали book.resolveHref(href) вручную,
+                // потом view.goTo(result.index) - ТОЛЬКО индексом, без
+                // anchor - из-за этого relocate фиксировал начало секции, а
+                // уже после (через scrollIntoView) экран докручивался к
+                // главе визуально, но пагинатор про этот скролл ничего не
+                // знал. Из-за этого и CFI сохранялся не тот (relocate уже
+                // отработал ДО докрутки), и подсветка оглавления брала
+                // устаревшую позицию.
+                //
+                // Теперь relocate стреляет УЖЕ с правильной позицией - и
+                // autoSavePosition(), и highlightCurrentTocItem() висят на
+                // глобальном view.addEventListener('relocate', ...) и сами
+                // получат верные данные. Отдельно вызывать
+                // highlightCurrentTocItem() здесь больше не нужно - только
+                // loadHighlights() (загрузка СОХРАНЁННЫХ ранее выделений
+                // текста для этой секции - отдельная задача, relocate её
+                // не решает).
+                await view.goTo(href);
+                toggleToc();
+                setTimeout(function() {
+                    loadHighlights();
+                }, 300);
+            } catch(e) {
+                log('TOC навигация: ' + e.message, 'warn');
+            }
         }
 
-        // Определить: является ли узел «группой» (часть/книга в сборнике)?
-        // Группа = имеет дочерние элементы И её label не похожа на обычную главу.
-        function isGroupNode(item, depth) {
-            if (!item.subitems?.length) return false;
-            // Всегда группа если depth=0 и есть дети
-            if (depth === 0) return true;
-            // На глубине 1: группа если дочерние тоже имеют детей (составная структура)
-            const childrenHaveChildren = item.subitems.some(c => c.subitems?.length > 0);
-            return childrenHaveChildren;
-        }
-
-        // Детектируем: нужна ли вообще иерархия?
-        function needsHierarchy(toc) {
-            // Иерархия нужна если хотя бы один top-level узел имеет детей
-            // И дети тоже имеют детей (значит это не просто "части с главами")
-            // ИЛИ если top-level узлов с детьми > 1 (сборник из книг)
-            const withChildren = toc.filter(n => n.subitems?.length > 0);
-            if (withChildren.length === 0) return false;      // flat — нет подуровней
-            // Проверяем глубину: если у детей тоже есть дети — точно нужна иерархия
-            const deep = withChildren.some(n => n.subitems.some(c => c.subitems?.length > 0));
-            if (deep) return true;
-            // Или если несколько top-level групп (части книги)
-            return withChildren.length >= 2;
-        }
-
-        // Заголовки которые нужно скрывать в оглавлении и при рендере.
-        // Пираты вставляют рекламные секции с этими заголовками в конец книги.
-        const HIDDEN_SECTIONS = [
-            'nota bene', 'note bene', 'notabene',
-            'от пирата', 'от пиратов', 'реклама',
-        ];
-
-        function isHiddenSection(label) {
-            if (!label) return false;
-            const l = label.trim().toLowerCase();
-            return HIDDEN_SECTIONS.some(s => l === s || l.startsWith(s));
-        }
-
-        function filterToc(items) {
-            return items
-                .filter(item => !isHiddenSection(item.label))
-                .map(item => ({
-                    ...item,
-                    subitems: item.subitems ? filterToc(item.subitems) : [],
-                }));
-        }
-
+        // Логика фильтрации/иерархии/рендера оглавления вынесена в toc.js.
+        // renderToc(toc) сохраняет прежнюю однопараметровую сигнатуру —
+        // контейнер и callback навигации передаются модулю здесь.
         function renderToc(toc) {
-            const container = document.getElementById('tocContent');
-            if (!container) return;
-            container.innerHTML = '';
-            toc = filterToc(toc); // убираем рекламные секции
-
-            if (!needsHierarchy(toc)) {
-                // ── Плоский вид: обычная книга с главами ──────────────────
-                function renderFlat(items, level) {
-                    items.forEach(item => {
-                        const div = document.createElement('div');
-                        div.className = 'toc-item level-' + level;
-                        div.textContent = item.label || '';
-                        div.dataset.href = item.href || '';
-                        div.onclick = () => tocNavigate(item.href);
-                        container.appendChild(div);
-                        if (item.subitems?.length) renderFlat(item.subitems, level + 1);
-                    });
-                }
-                renderFlat(toc, 1);
-                return;
-            }
-
-            // ── Иерархический вид: сборник или книга с частями ────────────
-            function renderHierarchy(items, parent, depth) {
-                items.forEach(item => {
-                    const hasKids = item.subitems?.length > 0;
-
-                    if (hasKids) {
-                        // Группа (книга / часть)
-                        const group = document.createElement('div');
-                        group.className = 'toc-group';
-
-                        const header = document.createElement('div');
-                        header.className = 'toc-group-header';
-                        if (depth > 0) header.style.paddingLeft = (14 + depth * 16) + 'px';
-
-                        const arrow = document.createElement('span');
-                        arrow.className = 'material-icons toc-arrow';
-                        arrow.textContent = 'chevron_right';
-
-                        const lbl = document.createElement('span');
-                        lbl.textContent = item.label || '';
-                        lbl.style.flex = '1';
-
-                        header.appendChild(arrow);
-                        header.appendChild(lbl);
-
-                        const children = document.createElement('div');
-                        children.className = 'toc-group-children';
-
-                        // Первая группа открыта по умолчанию
-                        if (depth === 0 && parent.children.length === 0) {
-                            children.classList.add('open');
-                            arrow.classList.add('open');
-                        }
-
-                        header.onclick = (e) => {
-                            const isOpen = children.classList.toggle('open');
-                            arrow.classList.toggle('open', isOpen);
-                            // Клик по названию раздела тоже может быть навигацией
-                        };
-                        // Долгий тап / правый клик на заголовок — перейти к этой части
-                        lbl.ondblclick = () => tocNavigate(item.href);
-
-                        group.appendChild(header);
-                        group.appendChild(children);
-                        parent.appendChild(group);
-                        renderHierarchy(item.subitems, children, depth + 1);
-                    } else {
-                        // Лист (глава)
-                        const div = document.createElement('div');
-                        div.className = 'toc-item';
-                        div.dataset.href = item.href || '';
-                        if (depth > 0) div.style.paddingLeft = (32 + depth * 16) + 'px';
-                        div.textContent = item.label || '';
-                        div.onclick = () => tocNavigate(item.href);
-                        parent.appendChild(div);
-                    }
-                });
-            }
-            renderHierarchy(toc, container, 0);
+            _renderTocImpl(toc, document.getElementById('tocContent'), tocNavigate);
         }
 
         // ══════════════════════════════════════════════════════════════
@@ -3224,11 +3306,7 @@
         }
 
         // Экранирование HTML для безопасного вывода
-        function escHtml(s) {
-            return String(s)
-                .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-                .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-        }
+        // escHtml вынесен в dom-text-utils.js (импортирован как escHtml выше)
 
         // ==================== TTS ЯДРО ====================
         // Использует встроенный foliate-js TTS класс:
@@ -3238,12 +3316,60 @@
         // - view.tts.getRanges() возвращает Map<name,range> для текущего блока
         // - view.tts.setMark(name) вызывает highlightFn(range) и запоминает позицию
 
+        // Обновляет кнопку play/pause и индикатор TTS в зависимости от ttsActive/ttsPaused.
+        // ВАЖНО: эта функция читает TTS-состояние (ttsActive, ttsPaused) — она
+        // случайно попала в диапазон, вырезанный при переносе кода закладок/
+        // подсветок в bookmarks-highlights.js, хотя по смыслу принадлежит
+        // TTS-ядру reader.html. Восстановлена здесь.
+        function updateTTSButtons() {
+            const btn = document.getElementById('ttsPlayPauseBtn');
+            const indicator = document.getElementById('ttsIndicator');
+            const controls = document.getElementById('ttsControls');
+            if (!btn || !indicator) return;
+
+            if (ttsActive) {
+                btn.innerHTML = '<span class="material-icons">pause</span>';
+                indicator.classList.add('active');
+                indicator.style.background = '';
+                if (controls) controls.classList.add('visible');
+            } else if (ttsPaused) {
+                btn.innerHTML = '<span class="material-icons">play_arrow</span>';
+                indicator.classList.add('active');
+                indicator.style.background = '#f59e0b';
+                if (controls) controls.classList.add('visible');
+            } else {
+                btn.innerHTML = '<span class="material-icons">play_arrow</span>';
+                indicator.classList.remove('active');
+                indicator.style.background = '';
+                if (controls) controls.classList.remove('visible');
+            }
+        }
+
         function getOverlayer() {
             try {
                 const contents = view?.renderer?.getContents();
                 return contents?.[0]?.overlayer || null;
             } catch(e) { return null; }
         }
+
+        // Инициализация bookmarks-highlights.js — передаём геттеры, так как
+        // bridge/view/book/currentSection/currentBookPath переприсваиваются
+        // в разных местах этого файла (подключение WebChannel, навигация и
+        // т.д.), а модуль должен всегда видеть АКТУАЛЬНОЕ значение, а не
+        // значение на момент инициализации.
+        initBookmarksHighlights({
+            getBridge: () => bridge,
+            getView: () => view,
+            getBook: () => book,
+            getCurrentSection: () => currentSection,
+            getCurrentBookPath: () => currentBookPath,
+            getOverlayer: () => getOverlayer(),
+            log,
+            HIGHLIGHT_COLORS,
+            Overlayer,
+            userHighlightMap,
+            findTextRange,
+        });
 
         function getTTSDoc() {
             try {
@@ -3253,20 +3379,29 @@
 
         function ttsHighlight(range) {
             clearTTSHighlight();
+            // Снимаем ручное выделение текста мышью (синяя/серая заливка) —
+            // оно осталось бы висеть поверх/рядом с TTS-подсветкой строки,
+            // если запустили озвучку через "Читать с этого места".
+            try {
+                if (currentRangeDoc) {
+                    currentRangeDoc.getSelection()?.removeAllRanges();
+                }
+                window.getSelection()?.removeAllRanges();
+            } catch(e) {}
+            currentRange = null;
+            currentSelection = null;
+            try { document.getElementById('selectionToolbar')?.classList.remove('visible'); } catch(e) {}
+
             const ov = getOverlayer();
             if (!ov || !range) return;
             const id = 'tts-' + Date.now();
             try {
-                // Определяем тёмную тему по фону документа
-                const docBg = getTTSDoc()?.documentElement?.style?.backgroundColor || '';
-                const isDarkTheme = docBg.includes('#1e1e1e') || docBg.includes('#121212') || 
-                                    docBg.includes('rgb(30') || docBg.includes('rgb(18');
-                
-                // Для тёмной темы: яркость 95% (f2), для светлой: 85% (cc)
-                const alpha = isDarkTheme ? 'f2' : 'cc';
-                const colorWithAlpha = ttsHighlightColor + alpha;
-                
-                ov.add(id, range, Overlayer.highlight, { color: colorWithAlpha });
+                // Цвет и прозрачность берутся из пользовательских настроек
+                // (ttsHighlightColor / ttsHighlightOpacity), а не жёстко заданы.
+                ov.add(id, range, Overlayer.highlight, {
+                    color: ttsHighlightColor,
+                    opacity: ttsHighlightOpacity,
+                });
                 currentTTSHighlightId = id;
                 // Сохраняем CFI текущей позиции TTS для кнопки "Вернуться"
                 try {
@@ -3284,7 +3419,7 @@
                         lastTtsSentenceText = ttsSentences[ttsSentenceIndex].text;
                     }
                 } catch(e3) {}
-                log(' Подсветка: ' + range.toString().substring(0, 40) + (isDarkTheme ? ' [тёмная тема]' : ''), 'tts');
+                log(' Подсветка: ' + range.toString().substring(0, 40), 'tts');
                 updateStats();
             } catch(e) {
                 log(' Ошибка подсветки: ' + e.message, 'error');
@@ -3355,11 +3490,30 @@
         let ttsWordRanges         = null;   // [{text, range}, ...] слова текущего предложения
 
         // Разбивает Range предложения на массив слов [{text, range}] по порядку
+        // Убирает маркеры сносок вида "[2]", "[12]" — цифра в квадратных
+        // скобках сразу после слова/номера (ссылка на пояснение в конце
+        // книги). Само слово перед сноской остаётся, только номер сноски
+        // вырезается — иначе TTS зачитывает "…не вспоминай [2]" вместо
+        // просто "…не вспоминай". Не трогает обычные квадратные скобки с
+        // текстом внутри (не только цифрами) — это может быть авторская
+        // ремарка, а не сноска.
+        function stripFootnoteMarkers(text) {
+            if (!text) return text;
+            return text.replace(/\s*\[\d{1,3}\]/g, '').replace(/\s{2,}/g, ' ');
+        }
+
         function splitSentenceIntoWords(sentRange) {
             const doc = sentRange.startContainer.ownerDocument;
             const result = [];
-            const walker = doc.createTreeWalker(
-                sentRange.commonAncestorContainer, NodeFilter.SHOW_TEXT, null);
+            // ИСПРАВЛЕНО: если commonAncestorContainer сам является текстовым узлом
+            // (Node.TEXT_NODE), TreeWalker с SHOW_TEXT, стартующий от него, не
+            // обходит сам этот узел как первый nextNode() — в итоге walker не
+            // возвращает ни одной ноды и функция отдаёт 0 слов даже когда
+            // предложение целиком лежит в одном текстовом узле. Поднимаемся к
+            // родительскому элементу, чтобы TreeWalker корректно увидел узел.
+            let root = sentRange.commonAncestorContainer;
+            if (root.nodeType === Node.TEXT_NODE) root = root.parentNode;
+            const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
             let node;
             while ((node = walker.nextNode())) {
                 const nodeRange = doc.createRange();
@@ -3383,13 +3537,19 @@
             return result;
         }
 
-        // Вызывается из Python когда WordBoundary-тайминги для текущего предложения готовы
+        // Вызывается из Python когда WordBoundary-тайминги для текущего предложения готовы.
+        // Только подсветка — никакого листания здесь никогда не было и не будет
+        // (листание для разрывных предложений теперь синхронно в window.ttsNext).
         window._ttsWordTimings = function(timings) {
             if (!ttsWordMode || !ttsActive) return;
             const s = ttsSentences[ttsSentenceIndex];
             if (!s) return;
             try {
-                ttsWordRanges = splitSentenceIntoWords(s.range);
+                // Для разрывного предложения слова строим по текущему траншу
+                // (parts[partIndex]), а не по всему s.range — иначе подсветка
+                // пыталась бы выйти за пределы текущей видимой страницы.
+                const rangeForWords = s.isSplitSentence ? s.parts[s.partIndex].range : s.range;
+                ttsWordRanges = splitSentenceIntoWords(rangeForWords);
                 _scheduleWordHighlights(timings);
             } catch(e) {
                 log(' Ошибка построения слов для подсветки: ' + e.message, 'warn');
@@ -3426,20 +3586,104 @@
 
         // Загружает предложения из текущего блока в ttsSentences[].
         // Возвращает true если есть предложения.
+        // Regex для определения "ложной" границы предложения на инициале:
+        // текст заканчивается на одну заглавную букву (кириллица или латиница)
+        // сразу перед точкой — например "Васильев П." — это НЕ конец предложения,
+        // а сокращение имени/отчества. Также ловим и обратный случай — кусок,
+        // состоящий ЦЕЛИКОМ из одной заглавной буквы с точкой (когда сегментатор
+        // умудрился выделить "П." отдельным микро-"предложением").
+        // \p{L} — любая буква (не только заглавная \p{Lu}): встречаются и
+        // "p. R." со строчной первой буквой (авторское форматирование),
+        // а не только "П." / "P." заглавными.
+        const INITIAL_TAIL_RE = /(?:^|[\s(])\p{L}\.$/u;
+        const INITIAL_ONLY_RE = /^\p{L}\.$/u;
+        // Кусок, оставшийся от разорванного маркера сноски — например
+        // сегментатор мог отрезать "[1]" от конца предыдущего предложения и
+        // отдать его отдельным микро-"предложением": "1]", "[1]", "12]".
+        // Открывающей скобки может уже не быть (осталась в предыдущем куске).
+        const BARE_FOOTNOTE_RE = /^\[?\d{1,3}\]$/;
+
+        /**
+         * Склеивает соседние сегменты, если Intl.Segmenter(granularity:'sentence')
+         * ошибочно разорвал предложение на инициале (например "Васильев П." | "П.
+         * пришёл..." или "Васильев П." | "П." | "пришёл..."). Озвучка Piper всё
+         * равно читает блок целиком без пауз на этом месте — рассинхрон был только
+         * в подсветке, которая опиралась на эти (неверно разбитые) границы.
+         */
+        function mergeInitialSplits(rawSentences) {
+            const merged = [];
+            for (const item of rawSentences) {
+                const prev = merged[merged.length - 1];
+                const prevEndsWithInitial = prev &&
+                    (INITIAL_TAIL_RE.test(prev.text) || INITIAL_ONLY_RE.test(prev.text));
+                // Голый обрубок сноски ("1]", "[1]") — не самостоятельное
+                // предложение ни при каких условиях, всегда приклеиваем к
+                // предыдущему куску (даже если prev не заканчивается на
+                // инициал) — иначе он озвучится/подсветится сам по себе.
+                const itemIsBareFootnote = BARE_FOOTNOTE_RE.test(item.text);
+                if (prev && (prevEndsWithInitial || itemIsBareFootnote)) {
+                    // Склеиваем prev.range и item.range в один непрерывный range,
+                    // чтобы подсветка охватывала оба куска сразу.
+                    try {
+                        const combined = prev.range.cloneRange();
+                        let endContainer = item.range.endContainer;
+                        let endOffset = item.range.endOffset;
+                        // Если конец range приходится на текстовый узел, но
+                        // endOffset не доходит до его реального конца (так
+                        // бывает, когда foliate-js отдаёт диапазон, обрезанный
+                        // по границе сегмента, а не по границе узла) —
+                        // расширяем до полной длины узла, чтобы подсветка
+                        // визуально захватывала весь видимый кусок целиком.
+                        if (endContainer.nodeType === Node.TEXT_NODE &&
+                            endOffset < endContainer.length) {
+                            endOffset = endContainer.length;
+                        }
+                        combined.setEnd(endContainer, endOffset);
+                        prev.range = combined;
+                        const joiner = itemIsBareFootnote ? '' : ' ';
+                        let joined = (prev.text + joiner + item.text).replace(/\s+/g, ' ').trim();
+                        // Если item был обрубком сноски — сам номер сноски из
+                        // склеенного текста тоже вырезаем (иначе он всё равно
+                        // прозвучит в TTS, просто уже не отдельным "предложением").
+                        if (itemIsBareFootnote) joined = stripFootnoteMarkers(joined);
+                        prev.text = joined;
+                        // ВАЖНО: после склейки s.range больше не совпадает с тем,
+                        // что foliate-js помнит под именем s.name — setMark(s.name)
+                        // подсветил бы ИСХОДНЫЙ (не расширенный) диапазон. Помечаем
+                        // сегмент как склеенный, чтобы при показе подсветки
+                        // использовать наш prev.range напрямую, а не setMark().
+                        prev.wasMerged = true;
+                        continue; // item поглощён предыдущим — не добавляем отдельно
+                    } catch (e) {
+                        // Если склейка Range не удалась (разные документы/узлы вне
+                        // общего предка и т.п.) — не рискуем, оставляем как есть.
+                        log(' mergeInitialSplits: не удалось склеить range: ' + e.message, 'warn');
+                    }
+                }
+                merged.push(item);
+            }
+            return merged;
+        }
+
         function loadSentencesFromBlock() {
             _clearWordHighlightSchedule();
             if (!view.tts) return false;
             const ranges = view.tts.getRanges();
             if (!ranges?.size) return false;
-            ttsSentences = [];
+            const rawSentences = [];
             for (const [name, range] of ranges) {
                 const text = range.toString().replace(/\s+/g, ' ').trim();
                 if (text.length < 1) continue;
-                // ttsSentences всегда хранит ПРЕДЛОЖЕНИЯ.
-                // Разбивка на слова для подсветки происходит отдельно,
-                // через ttsHighlightWordsInRange() по таймингам от TTS-движка.
-                ttsSentences.push({ name, text, range });
+                rawSentences.push({ name, text, range });
             }
+            // ttsSentences всегда хранит ПРЕДЛОЖЕНИЯ.
+            // Разбивка на слова для подсветки происходит отдельно,
+            // через ttsHighlightWordsInRange() по таймингам от TTS-движка.
+            // Перед сохранением склеиваем ложные разрывы на инициалах
+            // (см. mergeInitialSplits) — иначе подсветка обрывается на
+            // "Фамилия И." или показывает второй инициал отдельным куском,
+            // хотя сама озвучка идёт без паузы на этом месте.
+            ttsSentences = mergeInitialSplits(rawSentences);
             ttsSentenceIndex = 0;
             if (ttsSentences.length > 0) {
                 log(' Блок: ' + ttsSentences.length + ' предложений', 'tts');
@@ -3451,12 +3695,65 @@
         }
 
         // Убеждаемся, что range виден (для paginated режима — листаем если нужно)
+        // Границы текущей видимой страницы в АБСОЛЮТНЫХ координатах контента
+        // (renderer.start = правая граница, renderer.size = ширина одной страницы).
+        // range.getClientRects() внутри iframe уже возвращает эти же координаты —
+        // iframe сам не скроллится, скроллится внешний #container — поэтому здесь
+        // и во всех трёх функциях ниже сравнение идёт напрямую, без каких-либо
+        // пересчётов через frameElement/frameLeft.
+        function _pageBounds() {
+            const r = view?.renderer;
+            const size = r?.size ?? 0;
+            if (!r || !size) return null;
+            return { left: Math.max(0, r.start - size), right: r.start };
+        }
+
+        // Определяет: находится ли range на ТЕКУЩЕЙ видимой странице (без листания)?
+        //
+        // ИСПРАВЛЕНО: range.getClientRects() внутри iframe-документа уже возвращает
+        // АБСОЛЮТНЫЕ координаты контента (iframe сам не скроллится — скроллится
+        // внешний #container) — тот же принцип, что в getFirstVisibleRange()/
+        // getPreciseVisibleStartRange(). Пересчёт через frameElement.getBoundingClientRect()
+        // был лишним и ошибочным: смещение frameLeft «плавает» от текущего скролла
+        // #container, поэтому сравнение "плавало" вместе с ним и детект срабатывал
+        // на 1-2 строки раньше/позже. Теперь — прямое сравнение с границами
+        // страницы через _pageBounds(), без какого-либо пересчёта систем координат.
+        function isRangeOnCurrentPage(range) {
+            try {
+                if (!range) return false;
+                const bounds = _pageBounds();
+                if (!bounds) return false;
+
+                const rects = Array.from(range.getClientRects()).filter(r => r.width > 0);
+                if (!rects.length) return false;
+
+                // Достаточно, чтобы ХОТЯ БЫ один rect (обычно начало предложения)
+                // лежал в границах текущей страницы.
+                return rects.some(r => r.left >= bounds.left && r.left < bounds.right);
+            } catch(e) {
+                return false;
+            }
+        }
+
         async function ensureRangeVisible(range) {
             // Используем renderer.scrollToAnchor — именно так делает foliate-js TTS.
             // Он вычисляет Math.floor(rect.left / pageSize) и прыгает прямо на нужную
             // страницу, даже если она несколько страниц вперёд. view.next() делал
             // только один шаг, что ломало перелистывание в длинных главах.
+            //
+            // ИСПРАВЛЕНО: раньше вызывался безусловно для КАЖДОГО предложения, в том
+            // числе уже видимого на текущей странице — из-за этого renderer дёргался
+            // (relocate вперёд-назад) даже когда листать было не нужно, потому что
+            // scrollToAnchor всё равно проделывал полный пересчёт/скролл к anchor.
+            // Пока предложение читается на текущей видимой странице — вообще не
+            // трогаем позицию скролла, только подсвечиваем. Листание должно
+            // происходить ОДИН раз и только через явный переход между траншами
+            // разрывного предложения (см. window.ttsNext) или через turnPageTTS().
             if (!range || !view?.renderer) return;
+            if (isRangeOnCurrentPage(range)) {
+                log(' ensureRangeVisible: range уже на текущей странице — скролл не нужен', 'tts');
+                return;
+            }
             try {
                 await view.renderer.scrollToAnchor(range);
             } catch(e) {
@@ -3613,7 +3910,12 @@
                 const x = scrollStart + 6; // отступ от левого края колонки
 
                 const stepY = 6;
-                const maxY = Math.min(400, (doc.defaultView?.innerHeight ?? 400));
+                // Раньше сканировали только первые 400px — на страницах с высоким
+                // отступом сверху, крупным заголовком, буквицей или картинкой это
+                // пропускало настоящую первую строку и TTS стартовал с более
+                // позднего блока (визуально выглядело как "перескок" вниз страницы).
+                // Теперь сканируем всю видимую высоту страницы.
+                const maxY = doc.defaultView?.innerHeight ?? window.innerHeight ?? 800;
 
                 for (let y = stepY; y < maxY; y += stepY) {
                     let node = null, offset = 0;
@@ -3675,7 +3977,11 @@
                 if (!range) return false;
                 const rect = range.getBoundingClientRect();
                 if (!rect || rect.width === 0 || rect.height === 0) return false;
-                if (rect.top < 0 || rect.bottom > window.innerHeight) return false;
+                // Небольшой допуск (2px), чтобы не отбрасывать первую/последнюю строку
+                // из-за долей пикселя межстрочного интервала — раньше это могло
+                // приводить к пропуску верной стартовой строки и "перескоку" вниз.
+                const TOLERANCE = 2;
+                if (rect.top < -TOLERANCE || rect.bottom > window.innerHeight + TOLERANCE) return false;
 
                 const renderer = view?.renderer;
                 const totalSize = renderer?.size ?? window.innerWidth;
@@ -4033,9 +4339,15 @@
                         await advanceToNextSentence();
                     }
                 } else {
-                    // Не первая страница — используем ghost-режим для точного позиционирования
-                    let startRange = getLeftPageStartRange(renderer);
-                    if (!startRange) startRange = getPreciseVisibleStartRange(renderer);
+                    // Не первая страница — используем ghost-режим для точного позиционирования.
+                    // getPreciseVisibleStartRange() делает точный геометрический обход всех
+                    // текстовых узлов (binary search по символам) и надёжнее находит настоящую
+                    // первую видимую строку, чем getLeftPageStartRange(), который сканирует
+                    // фиксированную x-координату и раньше вызывал перескок на страницах
+                    // с высокими заголовками/буквицами/картинками сверху. Используем его первым,
+                    // старый метод — как резервный вариант.
+                    let startRange = getPreciseVisibleStartRange(renderer);
+                    if (!startRange) startRange = getLeftPageStartRange(renderer);
                     if (!startRange) startRange = getFirstVisibleRange();
 
                     if (!startRange) {
@@ -4220,6 +4532,12 @@
             ttsSentences = [];
             ttsSentenceIndex = 0;
             ttsPageTurning = false;
+            // Сбрасываем "отпечаток" последнего озвученного блока — иначе при
+            // повторном запуске TTS (Stop → Play) сигнатура первого блока новой
+            // сессии может случайно совпасть с сигнатурой, оставшейся от конца
+            // ПРЕДЫДУЩЕЙ сессии, и защита от дублей (см. blockSignature()) ложно
+            // сочтёт этот блок повтором и пропустит его целиком.
+            ttsLastBlockSignature = '';
             if (ttsSplitFlipTimer !== null) { clearTimeout(ttsSplitFlipTimer); ttsSplitFlipTimer = null; }
             if (bridge) bridge.stopTTS();
             clearTTSHighlight();
@@ -4269,11 +4587,86 @@
                 }
                 return;
             }
-            
+
             // Запоминаем текст — используется для пропуска дублей заголовков при смене секции
             ttsLastGlobalText = s.text;
 
-            if (!ttsWordMode) {
+            // ── «Виртуальное тире»: разрывное предложение — определяем ДО подсветки ──
+            // Разбиваем на два транша (part1/part2), только если s.isSplitSentence ещё
+            // не вычислялось для этого предложения (вычисляем один раз и кэшируем на s).
+            if (s.isSplitSentence === undefined) {
+                s.isSplitSentence = false;
+                try {
+                    const splitInfo = getSplitAcrossPageInfo(s.range);
+                    if (splitInfo.isSplit || splitInfo.startsBefore) {
+                        const bounds = _pageBounds();
+                        const words  = splitSentenceIntoWords(s.range);
+                        let firstOnCurrent = -1;  // первое слово, видимое на текущей странице
+                        let firstOnNext    = -1;  // первое слово уже на следующей странице
+                        if (bounds) {
+                            for (let wi = 0; wi < words.length; wi++) {
+                                const wRects = Array.from(words[wi].range.getClientRects()).filter(r => r.width > 0);
+                                if (!wRects.length) continue;
+                                if (firstOnCurrent < 0 && wRects[0].left >= bounds.left - 4 && wRects[0].left < bounds.right) firstOnCurrent = wi;
+                                if (wRects[0].left >= bounds.right) { firstOnNext = wi; break; }
+                            }
+                        }
+                        const doc  = s.range.startContainer.ownerDocument;
+                        const norm = t => t.replace(/\s+/g, ' ').trim();
+                        const mkRange = (w0, w1) => {
+                            const r = doc.createRange();
+                            r.setStart(words[w0].range.startContainer, words[w0].range.startOffset);
+                            r.setEnd(words[w1].range.endContainer, words[w1].range.endOffset);
+                            return r;
+                        };
+                        const last = words.length - 1;
+                        const parts = [];
+                        let partIndex = 0;
+                        if (splitInfo.startsBefore && firstOnCurrent > 0) {
+                            // Предложение началось на предыдущей странице: часть 0 невидима,
+                            // стартуем с видимой половины (часть 1).
+                            parts.push({ text: norm(mkRange(0, firstOnCurrent - 1).toString()), range: mkRange(0, firstOnCurrent - 1) });
+                            const curEnd = firstOnNext > 0 ? firstOnNext - 1 : last;
+                            parts.push({ text: norm(mkRange(firstOnCurrent, curEnd).toString()), range: mkRange(firstOnCurrent, curEnd) });
+                            if (firstOnNext > 0) {
+                                parts.push({ text: norm(mkRange(firstOnNext, last).toString()), range: mkRange(firstOnNext, last) });
+                            }
+                            partIndex = 1;   // ← старт с половины предложения
+                        } else if (firstOnNext > 0) {
+                            // Обычный случай: начало на текущей странице, хвост на следующей.
+                            parts.push({ text: norm(mkRange(0, firstOnNext - 1).toString()), range: mkRange(0, firstOnNext - 1) });
+                            parts.push({ text: norm(mkRange(firstOnNext, last).toString()), range: mkRange(firstOnNext, last) });
+                            partIndex = 0;
+                        }
+                        if (parts.length > 1) {
+                            s.isSplitSentence = true;
+                            s.parts = parts;
+                            s.partIndex = partIndex;
+                            log(` Виртуальное тире: частей=${parts.length}, старт с части ${partIndex + 1}`, 'tts');
+                        }
+                    }
+                } catch(e) {
+                    log(' Виртуальное тире: ошибка вычисления — ' + e.message, 'warn');
+                }
+            }
+
+            // Активная часть: либо транш разрывного предложения, либо предложение целиком
+            const activeRange = s.isSplitSentence ? s.parts[s.partIndex].range : s.range;
+            const activeTextRaw = s.isSplitSentence ? s.parts[s.partIndex].text : s.text;
+            // Сноски-цифры в тексте вида "слово[2]" или "24:7[2]" — это ссылка
+            // на пояснение в конце книги, а не часть фразы; для TTS/записи
+            // цифру сноски вырезаем, само слово перед ней озвучиваем как есть.
+            const activeText = stripFootnoteMarkers(activeTextRaw);
+
+            if (s.isSplitSentence || s.wasMerged) {
+                // Прямая подсветка транша/склеенного предложения — НЕ setMark
+                // (setMark работает с исходным s.name/диапазоном foliate-js,
+                // который для склеенных инициалов/сносок короче, чем реальный
+                // s.range после mergeInitialSplits — подсветка бы не дотягивала
+                // до конца).
+                _clearWordHighlightSchedule();
+                try { ttsHighlight(activeRange.cloneRange()); } catch(e) {}
+            } else if (!ttsWordMode) {
                 try {
                     // setMark вызывает ttsHighlight(range) через callback, который рисует подсветку
                     view.tts.setMark(s.name);
@@ -4298,157 +4691,60 @@
             // страница уже на месте, не нужно прыгать на физическое положение в потоке.
             if (ttsSuppressScroll) {
                 ttsSuppressScroll = false; // сбрасываем после первого предложения
-            } else {
+            } else if (!s.isSplitSentence) {
+                // Для траншей разрывного предложения ensureRangeVisible не нужен —
+                // part1 всегда на текущей странице по построению, а part2 показывается
+                // уже ПОСЛЕ явного renderer.next() в window.ttsNext (см. ниже).
                 try { await ensureRangeVisible(s.range); } catch(e) {}
             }
-            log(' [' + (ttsSentenceIndex+1) + '/' + ttsSentences.length + '] ' + s.text.substring(0, 60), 'tts');
+            log(' [' + (ttsSentenceIndex+1) + '/' + ttsSentences.length + '] ' + activeText.substring(0, 60), 'tts');
             if (bridge) {
                 log(' Вызываем bridge.onTTSText()', 'tts');
-                log(' Текст: ' + s.text.substring(0, 200), 'tts');
-
-                // ── Умное листание: определяем намерение, таймер запускаем по точной PCM-длительности ──
-                // 1. Вычисляем нужно ли листать и с каким fraction.
-                // 2. bridge.onTTSText запускает синтез в Python (фон. поток).
-                // 3. Python вызывает window._ttsDurationMs(ms) после синтеза PCM.
-                // 4. Polling (~20мс) ловит точную длительность и запускает таймер.
-                //    Если за 400мс не пришла — fallback на оценку по символам.
-                // Точность таймера: ±1% вместо ±20% при оценке по символам.
-
-                const splitInfo = getSplitAcrossPageInfo(s.range);
-                let flipIntent = null;  // { type: 'split'|'end', fraction }
-
-                if (splitInfo.isSplit) {
-                    const totalChars  = s.text.length;
-                    const charsOnPage = splitInfo.charsOnCurrentPage;
-                    const fraction    = Math.max(0.1, Math.min(0.9, (charsOnPage - 3) / totalChars));
-                    flipIntent = { type: 'split', fraction };
-                    log(` Split-предл.: ${charsOnPage}/${totalChars} символов, fraction=${Math.round(fraction*100)}%`, 'tts');
-                } else {
-                    const nextIdx   = ttsSentenceIndex + 1;
-                    const nextRange = nextIdx < ttsSentences.length ? ttsSentences[nextIdx].range : null;
-                    if (nextRange && isOnNextPage(nextRange)) {
-                        flipIntent = { type: 'end', fraction: 0.82 };
-                        log(' End-of-right-page: следующее предл. на новом развороте', 'tts');
-                    }
-                }
-
-                if (flipIntent) {
-                    ttsLastPcmDurationMs = 0; // сброс — ждём свежее значение
-                    const _capturedIntent = flipIntent;
-                    const _capturedText   = s.text;
-                    let   _pollDone       = false;
-
-                    const _scheduleFlip = (durationMs) => {
-                        if (_pollDone || !ttsActive) return;
-                        _pollDone = true;
-                        if (ttsSplitFlipTimer !== null) return;
-
-                        const flipDelayMs = Math.round(durationMs * _capturedIntent.fraction);
-                        log(` Листание через ${flipDelayMs}ms (${_capturedIntent.type}, pcm=${durationMs}ms)`, 'tts');
-
-                        const timer = setTimeout(async () => {
-                            if (_capturedIntent.type === 'end') ttsSplitFlipTimer = null;
-                            if (!ttsActive || ttsPageTurning) return;
-                            log(` ${_capturedIntent.type}-листание: renderer.next()`, 'tts');
-                            ttsPageTurning = true;
-                            await new Promise(resolve => {
-                                view.renderer.addEventListener('relocate', () => resolve(), { once: true });
-                                setTimeout(resolve, 1500);
-                                view.renderer.next();
-                            });
-                            await new Promise(r => setTimeout(r, 60));
-                            ttsPageTurning = false;
-                            log(` ${_capturedIntent.type}-листание завершено`, 'tts');
-                        }, flipDelayMs);
-
-                        ttsSplitFlipTimer = timer;
-                    };
-
-                    // Polling: ждём точную длительность от Python макс. 400мс
-                    let _waited = 0;
-                    const _poll = setInterval(() => {
-                        _waited += 20;
-                        if (ttsLastPcmDurationMs > 0) {
-                            clearInterval(_poll);
-                            const exact = ttsLastPcmDurationMs;
-                            ttsLastPcmDurationMs = 0;
-                            _scheduleFlip(exact);
-                        } else if (_waited >= 400) {
-                            clearInterval(_poll);
-                            // Fallback: оценка по символам
-                            const fallback = Math.max(300, Math.round(
-                                _capturedText.length / (13 * (ttsSpeed || 1.0)) * 1000
-                            ));
-                            log(` Fallback оценка: ${fallback}ms`, 'tts');
-                            _scheduleFlip(fallback);
-                        }
-                    }, 20);
-                }
-                // ─────────────────────────────────────────────────────────────────
-
-                bridge.onTTSText(s.text);
-
+                log(' Текст: ' + activeText.substring(0, 200), 'tts');
+                bridge.onTTSText(activeText);
             } else {
                 log(' bridge не определён!', 'error');
             }
         }
 
-        // Определяет: пересекает ли range границу разворота?
+
+        // Определяет: пересекает ли range границу СТРАНИЦЫ?
         // Возвращает { isSplit: bool, charsOnCurrentPage: number }
         // charsOnCurrentPage — приблизительное количество символов видимой части.
+        //
+        // ИСПРАВЛЕНО (3-я итерация): предыдущая версия пересчитывала
+        // rect.left → "абсолютные координаты контента" через frameElement.
+        // getBoundingClientRect(), но rect.left из range.getClientRects() внутри
+        // iframe-документа УЖЕ является абсолютной координатой контента — iframe
+        // сам не скроллится (скроллится внешний #container). Пересчёт через
+        // frameLeft был лишним и ошибочным: frameLeft «плавает» вместе с текущим
+        // скроллом #container, поэтому граница «плавала» вместе с ним же — отсюда
+        // срабатывание на 1-2 строки раньше/позже. Тот же принцип уже правильно
+        // реализован в getFirstVisibleRange()/getPreciseVisibleStartRange().
+        // Теперь — прямое сравнение rect.left с границами _pageBounds(),
+        // без каких-либо пересчётов систем координат.
         function getSplitAcrossPageInfo(range) {
-            const empty = { isSplit: false, charsOnCurrentPage: 0 };
+            const empty = { isSplit: false, charsOnCurrentPage: 0, startsBefore: false };
             try {
-                if (!range || !view?.renderer) return empty;
-
-                // Ширина одного разворота в viewport-пикселях
-                const totalSize = view.renderer.size;
-                if (!totalSize) return empty;
-
-                // В spread-режиме renderer.size = ширина обоих столбцов.
-                // Один столбец = totalSize / columnCount.
-                // Следующий разворот начинается именно с totalSize.
-                const paginatorEl = document.querySelector('foliate-paginator');
-                let columnCount = 1;
-                if (paginatorEl) {
-                    const cc = parseInt(getComputedStyle(paginatorEl)
-                        .getPropertyValue('--_max-column-count-spread'));
-                    if (cc >= 1) columnCount = cc;
-                }
-
-                // Смещение iframe в viewport (текст рендерится внутри iframe)
-                const contents = view.renderer.getContents?.();
-                const frameEl  = contents?.[0]?.doc?.defaultView?.frameElement;
-                const frameLeft = frameEl ? frameEl.getBoundingClientRect().left : 0;
-
+                if (!range) return empty;
+                const bounds = _pageBounds();
+                if (!bounds) return empty;
                 const rects = Array.from(range.getClientRects()).filter(r => r.width > 0);
                 if (!rects.length) return empty;
-
-                // Переводим rect.left в viewport-координаты
-                const viewportRects = rects.map(r => ({ ...r, vLeft: r.left + frameLeft }));
-
-                // Правая граница видимой области — берём из реального размера iframe
-                const frameEl2  = contents?.[0]?.doc?.defaultView?.frameElement;
-                const frameRect2 = frameEl2?.getBoundingClientRect();
-                // Используем реальный right если есть, иначе fallback на renderer.size
-                const boundary = frameRect2
-                    ? frameRect2.right - 4
-                    : totalSize - 4;
-
-                const onCurrent = viewportRects.filter(r => r.vLeft <  boundary);
-                const onNext    = viewportRects.filter(r => r.vLeft >= boundary);
-
-                if (!onCurrent.length || !onNext.length) return empty;
-
-                // Доля по площади → приблизительное число символов на текущей странице
+                const tol = 4;
+                const onPrev    = rects.filter(r => r.left < bounds.left - tol);
+                const onCurrent = rects.filter(r => r.left >= bounds.left - tol && r.left < bounds.right);
+                const onNext    = rects.filter(r => r.left >= bounds.right);
+                if (!onCurrent.length && !onNext.length) return empty;
                 const areaOf = rs => rs.reduce((s, r) => s + r.width * r.height, 0);
-                const fraction    = areaOf(onCurrent) / (areaOf(onCurrent) + areaOf(onNext));
-                const charsOnPage = Math.round(range.toString().length * fraction);
-
-                log(` getSplitAcrossPageInfo: ${onCurrent.length}/${onNext.length} rects, ` +
-                    `${Math.round(fraction*100)}% на текущей, frameLeft=${Math.round(frameLeft)}, ` +
-                    `boundary=${Math.round(boundary)}`, 'tts');
-                return { isSplit: true, charsOnCurrentPage: charsOnPage };
+                const total = areaOf(onPrev) + areaOf(onCurrent) + areaOf(onNext);
+                const fraction = total ? areaOf(onCurrent) / total : 0;
+                return {
+                    isSplit: (onCurrent.length > 0 && onNext.length > 0) ||
+                             (onPrev.length > 0 && onCurrent.length > 0),
+                    charsOnCurrentPage: Math.round(range.toString().length * fraction),
+                    startsBefore: onPrev.length > 0,   // предложение началось на ПРЕДЫДУЩЕЙ странице
+                };
             } catch(e) {
                 return empty;
             }
@@ -4490,42 +4786,36 @@
         //
         // getBoundingClientRect() → VIEWPORT-координаты.
         // renderer.size = ширина одного разворота в viewport-пикселях.
+        // Проверяет: range ушёл НА СЛЕДУЮЩУЮ СТРАНИЦУ целиком?
         //
-        // Текущий разворот: rect.left < renderer.size
-        // Следующий разворот: rect.left >= renderer.size
+        // Ключевое отличие от split-предложений:
+        //   isOnNextPage  → true только если ВСЕ rects предложения за границей
+        //   getSplitAcrossPageInfo → обрабатывает случай когда часть здесь, часть там
         //
+        // ИСПРАВЛЕНО (3-я итерация): убран пересчёт через frameElement/frameLeft —
+        // rect.left из range.getClientRects() внутри iframe уже является абсолютной
+        // координатой контента (см. комментарий у getSplitAcrossPageInfo и
+        // _pageBounds() выше). Прямое сравнение с bounds.right, без toContentX.
         function isOnNextPage(range) {
             try {
-                if (!range || !view?.renderer) return false;
-
-                // Берём реальный iframe элемент и его фактический viewport
-                const contents = view.renderer.getContents?.();
-                const frameEl  = contents?.[0]?.doc?.defaultView?.frameElement;
-                if (!frameEl) return false;
-
-                const frameRect = frameEl.getBoundingClientRect();
-                const frameLeft = frameRect.left;
-
-                // Реальная правая граница ВИДИМОЙ области iframe
-                // Это то что пользователь реально видит на экране
-                // frameRect.right = frameLeft + реальная ширина iframe в viewport-пикселях
-                const visibleRight = frameRect.right;
+                if (!range) return false;
+                const bounds = _pageBounds();
+                if (!bounds) return false;
 
                 const rects = Array.from(range.getClientRects()).filter(r => r.width > 0);
                 if (!rects.length) return false;
 
-                // Левый край каждого rect в viewport-координатах
-                const viewportLefts = rects.map(r => r.left + frameLeft);
-                const minVLeft = Math.min(...viewportLefts);
+                const minLeft = Math.min(...rects.map(r => r.left));
 
                 // Небольшой допуск на субпиксельное округление
                 const tolerance = 4;
-                log(` isOnNextPage: minVLeft=${minVLeft.toFixed(1)} `+
-                    `visibleRight=${visibleRight.toFixed(1)} `+
-                    `frameLeft=${frameLeft.toFixed(1)} `+
-                    `frameRight=${frameRect.right.toFixed(1)}`, 'tts');
-                return minVLeft >= visibleRight - tolerance;
-            } catch(e) { return false; }
+                log(` isOnNextPage: minLeft=${minLeft.toFixed(1)} `+
+                    `right=${bounds.right.toFixed(1)}`, 'tts');
+                return minLeft >= bounds.right - tolerance;
+            } catch(e) {
+                log(' isOnNextPage ошибка: ' + e.message, 'warn');
+                return false;
+            }
         }
 
         // Листает страницу и продолжает TTS с текущего предложения
@@ -4573,8 +4863,8 @@
 
             if (ttsSentenceIndex < ttsSentences.length) {
                 const next = ttsSentences[ttsSentenceIndex];
-                // Если предыдущее предложение было split и уже листнулось через
-                // ttsSplitFlipTimer — isOnNextPage вернёт false (мы уже на нужной стр.)
+                // Если предыдущее предложение было split — переворот уже произошёл
+                // синхронно в window.ttsNext (виртуальное тире), а не по таймеру.
                 if (isOnNextPage(next.range)) {
                     log(' Следующее предл. на новой странице → листаем', 'tts');
                     await turnPageTTS();
@@ -4741,7 +5031,7 @@
             // иначе getBlocks() захватит текст до того как display:none применится
             try {
                 const contents = view.renderer?.getContents?.();
-                if (contents?.length > 0) hideAdSections(contents[0].doc);
+                if (contents?.length > 0) { hideAdSections(contents[0].doc); hideFakeTOCLists(contents[0].doc); }
             } catch(e) {}
 
             const ssml = view.tts.start();
@@ -4792,11 +5082,31 @@
                 log(' ttsNext: уже выполняется, повторный вызов отброшен (двойной callback)', 'warn');
                 return;
             }
-            // Отменяем split-таймер предыдущего предложения (если не сработал)
+            // УСТАРЕЛО: раньше здесь отменялся таймер листания — таймеров больше нет.
             if (ttsSplitFlipTimer !== null) { clearTimeout(ttsSplitFlipTimer); ttsSplitFlipTimer = null; }
             _ttsNextRunning = true;
             log(' ttsNext вызван из Python', 'tts');
             try {
+                // ── «Виртуальное тире»: транш 1 разрывного предложения дозвучал ──
+                // Перелистываем СИНХРОННО (страница переворачивается ровно сейчас,
+                // а не по угадываемому таймеру), затем озвучиваем транш 2. Дальше
+                // не продвигаемся — advanceToNextSentence() вызовется только после
+                // того, как ttsNext() снова придёт по завершении транша 2.
+                const cur = ttsSentences[ttsSentenceIndex];
+                if (cur && cur.isSplitSentence && cur.partIndex < cur.parts.length - 1) {
+                    cur.partIndex++;
+                    log(' Виртуальное тире: транш дозвучал → перелистываем перед следующим траншем', 'tts');
+                    ttsPageTurning = true;
+                    await new Promise(resolve => {
+                        view.renderer.addEventListener('relocate', () => resolve(), { once: true });
+                        setTimeout(resolve, 1500);
+                        view.renderer.next();
+                    });
+                    await new Promise(r => setTimeout(r, 60));
+                    ttsPageTurning = false;
+                    await speakCurrentSentence();
+                    return;
+                }
                 await advanceToNextSentence();
             } finally {
                 _ttsNextRunning = false;
@@ -4839,626 +5149,16 @@
 
         // ── ЗАКЛАДКИ ──
 
-        let bookmarks = []; // кэш закладок текущей книги
+        // Закладки, подсветки, заметки и панель выделений вынесены в
+        // bookmarks-highlights.js — используются через импортированные
+        // функции (loadBookmarks, loadHighlights, applyHighlightsForCurrentSection,
+        // toggleBookmark, addCurrentBookmark, addBookmarkWithText, showToast,
+        // updateBookmarkButton, findHighlightForCurrentSelection,
+        // updateHighlightButtonIcon, deleteCurrentHighlight, openNoteDialog,
+        // closeNoteDialog, saveNoteFromDialog, renderHighlightsPanel).
+        // Инициализация модуля (initBookmarksHighlights) — см. ниже, после
+        // определения bridge/view/getOverlayer/log.
 
-        function loadBookmarks() {
-            if (!bridge) return;
-            bridge.getBookmarks(json => {
-                try {
-                    bookmarks = JSON.parse(json) || [];
-                    // Миграция: CFI и fraction сохраняем
-                    let migrated = false;
-                    bookmarks.forEach(bm => {
-                        if (bm.position?.cfi) {
-                            // CFI уже есть, ничего не делаем
-                        } else if (bm.position?.fraction) {
-                            // Конвертируем fraction в position (для старых закладок)
-                            bm.position.cfi = null;  // Будет получен при следующем переходе
-                        }
-                        if (bm.position?.text) {
-                            delete bm.position.text;  // Удаляем text
-                        }
-                    });
-                    if (migrated) {
-                        log(' Миграция закладок: text удалён, fraction сохранён', 'info');
-                    }
-                    renderBookmarks();
-                    updateBookmarkButton();
-                } catch(e) {}
-            });
-        }
-
-        // ── ПОДСВЕТКИ ──
-
-        /**
-         * Загрузить и применить все сохранённые подсветки для текущей книги
-         */
-        function loadHighlights() {
-            if (!bridge || !view) return;
-            
-            bridge.getHighlights(function(result) {
-                try {
-                    const highlights = JSON.parse(result) || [];
-                    if (!highlights.length) {
-                        log(`ℹ Нет сохранённых подсветок`, 'highlight');
-                        return;
-                    }
-                    
-                    // Сохраняем подсветки в глобальной переменной для применения при навигации
-                    window.savedHighlights = highlights;
-                    log(` Загружено ${highlights.length} подсветок`, 'highlight');
-                    
-                    // Применяем подсветки для текущей секции
-                    applyHighlightsForCurrentSection();
-                    
-                } catch (e) {
-                    log(` Ошибка загрузки подсветок: ${e.message}`, 'error');
-                }
-            });
-        }
-
-        /**
-         * Применить подсветки для текущей секции
-         */
-        function applyHighlightsForCurrentSection() {
-            if (!window.savedHighlights || !view) return;
-
-            const ov = getOverlayer();
-            if (!ov) {
-                log(' Overlayer недоступен', 'error');
-                return;
-            }
-
-            // Сначала удаляем все пользовательские подсветки из overlayer
-            window.savedHighlights.forEach(h => {
-                try { ov.remove(h.id); } catch(e) {}
-            });
-
-            let applied = 0;
-            for (const h of window.savedHighlights) {
-                try {
-                    const highlightData = JSON.parse(h.cfi || '{}');
-                    const section = highlightData.section;
-                    
-                    // Проверяем чо подсветка в текущей секции
-                    if (section === currentSection) {
-                        const text = h.text;
-                        
-                        if (text && view.renderer) {
-                            const doc = view.renderer.getContents()[0]?.doc;
-                            if (doc) {
-                                // Ищем текст в документе
-                                const range = findTextRange(doc, text);
-                                if (range) {
-                                    const hexColor = HIGHLIGHT_COLORS[h.color] || '#aecbfa';
-                                    const overlayerId = h.id || ('user-' + Date.now());
-
-                                    const style = h.style || 'highlight';
-                                    const styleMethod = {
-                                        'highlight': Overlayer.highlight,
-                                        'underline': Overlayer.underline,
-                                        'squiggly': Overlayer.squiggly,
-                                    }[style] || Overlayer.highlight;
-
-                                    ov.add(overlayerId, range, styleMethod, { color: hexColor + 'b8' });
-                                    userHighlightMap[h.id] = overlayerId;
-                                    applied++;
-                                    log(` Подсветка применена: "${text.substring(0, 30)}..."`, 'highlight');
-                                } else {
-                                    log(` Текст не найден в секции ${section}`, 'warn');
-                                }
-                            }
-                        }
-                    }
-                } catch (e) {
-                    log(` Не удалось применить одсветку: ${e.message}`, 'warn');
-                }
-            }
-
-            if (applied > 0) {
-                log(` Применено ${applied} подсветок в текущей секции`, 'highlight');
-            }
-        }
-
-        /**
-         * Найти Range с указанным текстом в документе
-         */
-        function findTextRange(doc, searchText) {
-            if (!doc || !searchText) return null;
-            
-            const walker = doc.createTreeWalker(
-                doc.body || doc.documentElement,
-                NodeFilter.SHOW_TEXT,
-                null
-            );
-            
-            let node;
-            while ((node = walker.nextNode())) {
-                const text = node.textContent;
-                if (text && text.includes(searchText)) {
-                    const startIdx = text.indexOf(searchText);
-                    const range = doc.createRange();
-                    range.setStart(node, startIdx);
-                    range.setEnd(node, startIdx + searchText.length);
-                    return range;
-                }
-            }
-            return null;
-        }
-
-        function renderBookmarks() {
-            const list = document.getElementById('bookmarksList');
-            if (!list) return;
-            if (!bookmarks.length) {
-                list.innerHTML = '<div style="padding:16px;color:#888;text-align:center;">Нет закладок</div>';
-                return;
-            }
-            list.innerHTML = '';
-            bookmarks.forEach(bm => {
-                const div = document.createElement('div');
-                div.className = 'bookmark-item';
-                const isHighlight = bm.label?.startsWith('');
-                div.innerHTML = `
-                    <span class="material-icons" style="color:${isHighlight ? '#81c995' : '#d4a800'};font-size:18px;">${isHighlight ? 'border_color' : 'bookmark'}</span>
-                    <div style="flex:1;min-width:0">
-                        <div class="bm-label">${bm.label}</div>
-                        <div class="bm-progress">${Math.round((bm.progress||0)*100)}%</div>
-                    </div>
-                    <button class="bm-del" data-id="${bm.id}" title="Удалить">
-                        <span class="material-icons" style="font-size:18px;">delete_outline</span>
-                    </button>
-                `;
-                div.querySelector('.bm-del').addEventListener('click', e => {
-                    e.stopPropagation();
-                    if (bridge) {
-                        bridge.removeBookmark(bm.id);
-                        bookmarks = bookmarks.filter(b => b.id !== bm.id);
-                        renderBookmarks();
-                        updateBookmarkButton();
-                    }
-                });
-                div.addEventListener('click', async () => {
-                    try {
-                        const bmSection = bm.position?.section;
-                        const bmCfi = bm.position?.cfi;
-                        const bmFraction = bm.position?.fraction;
-                        
-                        if (bmSection !== undefined) {
-                            log(` Переход по закладке: ${bm.label}`, 'info');
-                            
-                            // Приоритет: CFI → fraction → section
-                            if (bmCfi && view) {
-                                log(`   переход по CFI`, 'info');
-                                await view.goTo(bmCfi);
-                            } else if (bmFraction !== undefined && view) {
-                                log(`   переход по fraction ${bmFraction}`, 'info');
-                                await view.goToFraction(bmFraction);
-                            } else {
-                                await view.goTo(bmSection);
-                            }
-                            
-                            // После перехода загружаем и применяем подсветки
-                            setTimeout(() => {
-                                loadHighlights();
-                                log(' Подсветки загружены после перехода', 'info');
-                            }, 500);
-                        }
-                    } catch(e) {
-                        log(' Ошибка перехода: ' + e.message, 'error');
-                    }
-                    setTimeout(() => {
-                        document.getElementById('bookmarksPanel').classList.remove('visible');
-                        document.getElementById('overlay').classList.remove('visible');
-                    }, 100);
-                });
-                list.appendChild(div);
-            });
-        }
-
-        // Поиск текста в документе
-        function findTextInDoc(doc, searchText) {
-            // Нормализуем текст (убираем лишние пробелы)
-            const normalizedSearch = searchText.trim().replace(/\s+/g, ' ');
-            
-            // Ищем по текстовым узлам
-            const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
-            let node;
-            let buffer = '';
-            let startNode = null;
-            
-            while ((node = walker.nextNode())) {
-                const text = node.textContent;
-                buffer += text;
-                
-                if (!startNode) startNode = node;
-                
-                // Проверяем, есть ли искомый текст в буфере
-                const index = buffer.indexOf(normalizedSearch);
-                if (index !== -1) {
-                    // Нашли! Возвращаем Range
-                    const range = doc.createRange();
-                    
-                    // Нужно найти начальный и конечный узлы
-                    let charCount = 0;
-                    let foundStart = false;
-                    let foundEnd = false;
-                    
-                    const walker2 = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
-                    let n;
-                    
-                    while ((n = walker2.nextNode())) {
-                        const nodeLen = n.textContent.length;
-                        
-                        if (!foundStart && charCount + nodeLen >= index) {
-                            range.setStart(n, index - charCount);
-                            foundStart = true;
-                        }
-                        
-                        if (foundStart && !foundEnd && charCount + nodeLen >= index + normalizedSearch.length) {
-                            range.setEnd(n, index + normalizedSearch.length - charCount);
-                            foundEnd = true;
-                            break;
-                        }
-                        
-                        charCount += nodeLen;
-                    }
-                    
-                    if (foundStart && foundEnd) {
-                        return range;
-                    }
-                }
-                
-                // Ограничиваем размер буфера
-                if (buffer.length > normalizedSearch.length + 100) {
-                    buffer = buffer.slice(-100);
-                    startNode = null;
-                }
-            }
-            
-            return null;
-        }
-
-        // Подсветка найденного текста
-        function highlightFoundText(range, doc) {
-            // Прокручиваем к тексту
-            const rect = range.getBoundingClientRect();
-            if (rect) {
-                const win = doc.defaultView;
-                win?.scrollTo({
-                    top: rect.top + win.scrollY - 100,
-                    behavior: 'smooth'
-                });
-            }
-            
-            // Временная подсветка (желтым на 2 секунды)
-            const selection = win.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
-            
-            setTimeout(() => {
-                selection.removeAllRanges();
-            }, 2000);
-        }
-
-        function toggleBookmark() {
-            const section = currentSection;
-            
-            // Получаем текущую позицию из view.lastLocation (foliate-js)
-            let currentPosition = 0;
-            
-            try {
-                if (view?.lastLocation) {
-                    currentPosition = view.lastLocation.index || 0;
-                }
-            } catch(e) {}
-            
-            // Ищем закладку по позиции (развороту)
-            const existing = bookmarks.find(b => b.position?.position === currentPosition);
-            
-            if (existing) {
-                if (bridge) bridge.removeBookmark(existing.id);
-                bookmarks = bookmarks.filter(b => b.id !== existing.id);
-                renderBookmarks();
-            } else {
-                addCurrentBookmark();
-            }
-            updateBookmarkButton();
-        }
-
-        function addCurrentBookmark() {
-            const section = currentSection;
-
-            let cfi = null;
-            let fraction = 0;
-
-            try {
-                if (view?.lastLocation) {
-                    cfi = view.lastLocation.cfi || null;
-                    fraction = view.lastLocation.fraction || 0;
-                }
-            } catch(e) {
-                log(' Не удалось получить CFI: ' + e.message, 'warn');
-            }
-
-            const label = `Позиция ${Math.round(fraction * 100) + 1}`;
-
-            const pos = JSON.stringify({
-                section,
-                cfi,
-                fraction
-            });
-
-            const totalSections = book?.sections?.length || 1;
-            const progress = totalSections > 1 ? section / (totalSections - 1) : 0;
-
-            if (bridge) {
-                bridge.saveBookmark(label, Math.max(0, Math.min(1, progress)), pos);
-                setTimeout(() => {
-                    loadBookmarks();
-                    updateBookmarkButton();
-                }, 150);
-                log(` Закладка: секция=${section}, cfi=${cfi ? 'да' : 'нет'}`, 'info');
-            }
-        }
-        
-        // Добавляет закладку с текстом выделения и точным CFI
-        function addBookmarkWithText(text, range) {
-            const section = currentSection;
-            
-            let cfi = null;
-            let fraction = 0;
-            
-            try {
-                if (range && view) {
-                    cfi = view.getCFI(section, range);
-                }
-                if (view?.lastLocation) {
-                    fraction = view.lastLocation.fraction || 0;
-                }
-            } catch(e) {
-                log(' Не удалось получить CFI: ' + e.message, 'warn');
-            }
-            
-            const textPreview = text.substring(0, 50).replace(/\s+/g, ' ').trim();
-            const label = textPreview.length >= 50 ? textPreview + '...' : textPreview;
-            
-            const pos = JSON.stringify({
-                section,
-                cfi,
-                fraction,
-                text
-            });
-            
-            const totalSections = book?.sections?.length || 1;
-            const progress = totalSections > 1 ? section / (totalSections - 1) : 0;
-            
-            if (bridge) {
-                bridge.saveBookmark(label, Math.max(0, Math.min(1, progress)), pos);
-                setTimeout(() => {
-                    loadBookmarks();
-                    updateBookmarkButton();
-                }, 150);
-                log(` Закладка с текстом: "${label}"`, 'bookmark');
-                showToast(` Закладка добавлена: "${label}"`);
-            }
-        }
-        
-        function showToast(message) {
-            document.querySelector('.toast-notification')?.remove();
-            
-            const toast = document.createElement('div');
-            toast.className = 'toast-notification';
-            toast.textContent = message;
-            toast.style.cssText = `
-                position: fixed;
-                bottom: 80px;
-                left: 50%;
-                transform: translateX(-50%);
-                background: rgba(32, 33, 36, 0.95);
-                color: white;
-                padding: 12px 24px;
-                border-radius: 8px;
-                font-size: 14px;
-                z-index: 10000;
-                box-shadow: 0 4px 16px rgba(0,0,0,0.3);
-                animation: fadeIn 0.3s ease;
-            `;
-            
-            document.body.appendChild(toast);
-            setTimeout(() => {
-                toast.style.opacity = '0';
-                toast.style.transition = 'opacity 0.3s ease';
-                setTimeout(() => toast.remove(), 300);
-            }, 2000);
-        }
-
-        function updateBookmarkButton() {
-            const btn = document.getElementById('bookmarkBtn');
-            if (!btn) return;
-            // Проверяем наличие закладки на текущей секции
-            const has = bookmarks.some(b => b.position?.section === currentSection);
-            btn.innerHTML = has
-                ? '<span class="material-icons bookmark-active">bookmark</span>'
-                : '<span class="material-icons">bookmark_border</span>';
-        }
-
-        function updateTTSButtons() {
-            const btn = document.getElementById('ttsPlayPauseBtn');
-            const indicator = document.getElementById('ttsIndicator');
-            const controls = document.getElementById('ttsControls');
-            if (!btn || !indicator) return;
-
-            if (ttsActive) {
-                btn.innerHTML = '<span class="material-icons">pause</span>';
-                indicator.classList.add('active');
-                indicator.style.background = '';
-                if (controls) controls.classList.add('visible');
-            } else if (ttsPaused) {
-                btn.innerHTML = '<span class="material-icons">play_arrow</span>';
-                indicator.classList.add('active');
-                indicator.style.background = '#f59e0b';
-                if (controls) controls.classList.add('visible');
-            } else {
-                btn.innerHTML = '<span class="material-icons">play_arrow</span>';
-                indicator.classList.remove('active');
-                indicator.style.background = '';
-                if (controls) controls.classList.remove('visible');
-            }
-        }
-
-        // ==================== ПОЛЬЗОВАТЕЛЬСКАЯ ПОДСВЕТКА ====================
-        
-        /**
-         * Проверить, есть ли подсветк для текущего выделенного текста.
-         * Возвращает результат через callback из-за асинхронности WebChannel.
-         * @param {function(object|null)} callback - функция обратного вызова с результатом {id, highlight} или null
-         */
-        function findHighlightForCurrentSelection(callback) {
-            if (!currentSelection || !bridge || !currentBookPath) {
-                callback(null);
-                return;
-            }
-
-            try {
-                bridge.getHighlights(function(result) {
-                    try {
-                        const highlights = JSON.parse(result) || [];
-                        const searchText = currentSelection.trim().replace(/\s+/g, ' ');
-
-                        if (!searchText) {
-                            callback(null);
-                            return;
-                        }
-
-                        // Нормализуем тексты подсветок (убираем лишние пробелы)
-                        for (const h of highlights) {
-                            const highlightText = (h.text || '').trim().replace(/\s+/g, ' ');
-                            
-                            // Точное совпадение
-                            if (highlightText === searchText) {
-                                log(` Найдена подсветка (точное совпадение): "${searchText}"`, 'highlight');
-                                callback({ id: h.id, highlight: h });
-                                return;
-                            }
-                        }
-
-                        // Частичное совпадение: выделенный текст содержится в подсветке или наоборот
-                        for (const h of highlights) {
-                            const highlightText = (h.text || '').trim().replace(/\s+/g, ' ');
-                            if (highlightText && searchText &&
-                                (highlightText.includes(searchText) || searchText.includes(highlightText))) {
-                                log(` Найдео частичное совпадение: "${searchText}" ↔ "${highlightText}"`, 'highlight');
-                                callback({ id: h.id, highlight: h });
-                                return;
-                            }
-                        }
-
-                        callback(null);
-                    } catch(e) {
-                        log(` Ошибка парсинга подсветок: ${e.message}`, 'error');
-                        callback(null);
-                    }
-                });
-            } catch (e) {
-                log(` Ошибка поиска подсветки: ${e.message}`, 'error');
-                callback(null);
-            }
-        }
-
-        /**
-         * Обновить иконку кнопки highlightBtn: карандаш если нет подсветки, корзина если есть
-         */
-        function updateHighlightButtonIcon() {
-            const highlightBtn = document.getElementById('highlightBtn');
-            if (!highlightBtn) return;
-            
-            const iconSpan = highlightBtn.querySelector('span.material-icons');
-            
-            // Проверяем наличие подсветки асинхронно
-            findHighlightForCurrentSelection(function(existingHighlight) {
-                if (existingHighlight) {
-                    // Есть подсветка — показываем корзину
-                    iconSpan.textContent = 'delete';
-                    highlightBtn.title = 'Удалить подветку';
-                } else {
-                    // Нет подсветки — показываем карандаш
-                    iconSpan.textContent = 'border_color';
-                    highlightBtn.title = 'Выделить';
-                }
-            });
-        }
-
-        /**
-         * Удалить подсветку для текущего выделения
-         */
-        function deleteCurrentHighlight() {
-            if (!bridge || !currentBookPath) {
-                log(' Нет моста или книги для удаления подсветки', 'error');
-                return false;
-            }
-
-            // Находим подсветку асинхронно
-            findHighlightForCurrentSelection(function(existingHighlight) {
-                if (!existingHighlight) {
-                    log(' Подсветка для текущего выделения не найдена', 'warn');
-                    return;
-                }
-
-                try {
-                    const pythonId = existingHighlight.id;
-                    log(` Удаляем подсветку ID=${pythonId}`, 'highlight');
-
-                    // Удаляем из Python
-                    bridge.removeHighlight(pythonId);
-
-                    // Удаляем из Overlayer (визуально)
-                    const ov = getOverlayer();
-                    if (ov) {
-                        try {
-                            // Пробуем удалить по ID из Python
-                            ov.remove(pythonId);
-                            log(` Подсветка удална из Overlayer`, 'highlight');
-                        } catch(e) {
-                            log(` Ошиба удаления из Overlayer: ${e.message}`, 'warn');
-                        }
-                    }
-
-                    // Удаляем из локального хранилищ
-                    delete userHighlightMap[pythonId];
-
-                    // Находим и удаляем закладку с этим текстом (WebChannel использует callback)
-                    const highlightText = existingHighlight.highlight?.text || '';
-                    bridge.getBookmarks(function(result) {
-                        try {
-                            const bookmarks = JSON.parse(result);
-                            for (const bm of bookmarks) {
-                                if (bm.label && bm.label.startsWith('') && highlightText && bm.label.includes(highlightText)) {
-                                    bridge.removeBookmark(bm.id);
-                                    log(` Закладка удалена: ${bm.id}`, 'highlight');
-                                    break;
-                                }
-                            }
-                        } catch(e) {
-                            log(` Ошибка получения закладок: ${e.message}`, 'error');
-                        }
-                    });
-
-                    // Обновляем UI закладок
-                    setTimeout(() => { loadBookmarks(); updateBookmarkButton(); }, 200);
-
-                    // Обновляем иконку кнопки
-                    updateHighlightButtonIcon();
-
-                    log(` Подсветка удалена: ${existingHighlight.highlight.text?.substring(0, 40)}`, 'highlight');
-
-                } catch (e) {
-                    log(` Ошибка удаления подсветки: ${e.message}`, 'error');
-                    console.error(e);
-                }
-            });
-
-            return true;
-        }
 
         function createUserHighlight(color = 'blue', style = 'highlight') {
             if (!currentRange || !currentRangeDoc) {
@@ -5607,10 +5307,10 @@
 
             document.getElementById('highlightBtn')?.addEventListener('click', () => {
                 // Проверяем наличие подсветки асинхронно
-                findHighlightForCurrentSelection(function(existingHighlight) {
+                findHighlightForCurrentSelection(currentSelection, function(existingHighlight) {
                     if (existingHighlight) {
                         // Есть подсветка — удаляем её
-                        deleteCurrentHighlight();
+                        deleteCurrentHighlight(currentSelection);
                     } else {
                         // Нет подсветки — показываем палитру для выбора цвета
                         const palette = document.getElementById('miniPalette');
@@ -5801,7 +5501,11 @@
 
             document.getElementById('dictionaryBtn')?.addEventListener('click', () => {
                 if (currentSelection) {
-                    window.open(`https://en.wiktionary.org/wiki/${encodeURIComponent(currentSelection)}`, '_blank');
+                    // Словарь/перевод — отдельное окно на стороне Python
+                    // (translator_window.py), не встроенный попап.
+                    if (bridge && bridge.openTranslator) {
+                        bridge.openTranslator(currentSelection);
+                    }
                     document.getElementById('selectionToolbar').classList.remove('visible');
                 }
             });
@@ -6152,127 +5856,111 @@
 
         // ==================== UI ====================
         function highlightCurrentTocItem() {
-            const tocItem = view?.lastLocation?.tocItem;
-            const currentHref = tocItem?.href ?? '';
-            const items = document.querySelectorAll('#tocContent .toc-item');
-            let best = null;
-            items.forEach(el => {
-                el.classList.remove('current');
-                const h = el.dataset.href || '';
-                if (!h) return;
-                // Сравниваем href без якоря
-                if (h.split('#')[0] === currentHref.split('#')[0] ||
-                    h === currentHref) {
-                    best = el;
-                }
-            });
-            // Фолбэк — ищем по номеру секции
-            if (!best) {
-                const idx = currentSection;
-                const allItems = Array.from(items);
-                if (idx >= 0 && idx < allItems.length) best = allItems[idx];
-            }
-            if (best) {
-                best.classList.add('current');
-                setTimeout(() => best.scrollIntoView({ block: 'center', behavior: 'smooth' }), 50);
-            }
+    var tocItems = document.querySelectorAll('#tocContent .toc-item');
+    if (!tocItems.length) {
+        return;
+    }
+
+    var loc = view?.lastLocation;
+    var currentSection = loc?.section?.current ?? 0;
+    var tocItem = loc?.tocItem;
+    var currentHref = tocItem?.href ?? '';
+
+    // Сначала безусловно снимаем current со ВСЕХ пунктов, отдельным
+    // проходом. Раньше это делалось в том же цикле, что искал совпадение,
+    // и по first break цикл останавливался — пункты ПОСЛЕ найденного по
+    // списку никогда не проверялись, и если current стоял на одном из
+    // них с прошлого раза, он так и оставался висеть рядом с новым.
+    for (var el of tocItems) {
+        el.classList.remove('current');
+    }
+
+    var bestMatch = null;
+    var bestText = '';
+
+    // ⭐ ИСПОЛЬЗУЕМ for...of с break
+    for (var el of tocItems) {
+        var href = el.dataset.href || '';
+        if (!href) {
+            continue;
         }
 
-        function toggleToc() {
-            const tocPanel = document.getElementById('tocPanel');
-            const bookmarksPanel = document.getElementById('bookmarksPanel');
-            const overlay = document.getElementById('overlay');
-            
-            // Если открыты закладки — закрываем их перед открытием оглавления
-            if (bookmarksPanel.classList.contains('visible')) {
-                bookmarksPanel.classList.remove('visible');
-            }
-            
-            // Переключаем оглавление
-            const willOpen = !tocPanel.classList.contains('visible');
-            tocPanel.classList.toggle('visible');
-            overlay.classList.toggle('visible');
-            
-            if (willOpen) {
-                // Всегда открываем на вкладке оглавления, а не поиска
-                switchTocTab('toc');
-                highlightCurrentTocItem();
-            } else {
-                overlay.classList.remove('visible');
+        // ⭐ Если href совпадает — это наш кандидат, останавливаемся
+        if (href === currentHref) {
+            bestMatch = el;
+            bestText = el.textContent.trim();
+            break;  // ⭐ break останавливает цикл
+        }
+
+        // ⭐ Если текущий href без якоря, а у элемента есть якорь 0
+        // (для случаев, когда currentHref = "0", а элементы имеют "0#0")
+        if (currentHref === '0' && href === '0#0') {
+            bestMatch = el;
+            bestText = el.textContent.trim();
+            break;
+        }
+    }
+
+    // Фолбэк: если ничего не нашли, берём первый элемент в секции
+    if (!bestMatch) {
+        for (var el of tocItems) {
+            var href = el.dataset.href || '';
+            var parts = href.split('#');
+            var section = parseInt(parts[0]);
+            if (section === currentSection) {
+                bestMatch = el;
+                bestText = el.textContent.trim();
+                break;
             }
         }
+    }
+
+    if (bestMatch) {
+        bestMatch.classList.add('current');
+        setTimeout(function() {
+            try {
+                bestMatch.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            } catch(e) {}
+        }, 50);
+        log('TOC подсветка: "' + bestText.substring(0, 30) + '..."', 'nav');
+    } else {
+        log('TOC подсветка: не найдено для секции ' + currentSection, 'warn');
+    }
+}
+
+
+       function toggleToc() {
+    var tocPanel = document.getElementById('tocPanel');
+    var bookmarksPanel = document.getElementById('bookmarksPanel');
+    var overlay = document.getElementById('overlay');
+
+    if (bookmarksPanel.classList.contains('visible')) {
+        bookmarksPanel.classList.remove('visible');
+    }
+
+    var willOpen = !tocPanel.classList.contains('visible');
+    tocPanel.classList.toggle('visible');
+    overlay.classList.toggle('visible');
+
+    if (willOpen) {
+        switchTocTab('toc');
+        setTimeout(function() {
+            highlightCurrentTocItem();
+        }, 50);
+    } else {
+        overlay.classList.remove('visible');
+    }
+}
 
         // ═══════════════════════════════════════════════════════════════
         // ПАНЕЛЬ ВЫДЕЛЕНИЙ И ЗАМЕТОК
         // ═══════════════════════════════════════════════════════════════
 
-        // ── Цвета выделений ──────────────────────────────────────────
-        const HL_COLOR_MAP = {
-            red: '#f28b82', violet: '#d7aefb', blue: '#aecbfa',
-            green: '#ccff90', yellow: '#fdd663', cyan: '#80deea',
-            default: '#aecbfa'
-        };
-
-        // ── Состояние диалога заметки ─────────────────────────────────
-        let _noteDialogHighlightId = null;
-        let _noteDialogNoteId      = null;  // null = новая заметка, string = редактирование
-
-        // ── Открыть диалог заметки ────────────────────────────────────
-        // highlightId : ID выделения к которому привязывается заметка ('' если нет)
-        // quoteText   : текст цитаты для показа в диалоге
-        // existingNote: объект существующей заметки для редактирования (null = новая)
-        // cfiJson     : CFI текущей позиции (для заметок без выделения)
-        function openNoteDialog(highlightId, quoteText, existingNote, cfiJson) {
-            _noteDialogHighlightId = highlightId || '';
-            _noteDialogNoteId      = existingNote ? existingNote.id : null;
-
-            const overlay   = document.getElementById('noteDialogOverlay');
-            const titleEl   = document.getElementById('noteDialogTitle');
-            const quoteEl   = document.getElementById('noteDialogQuote');
-            const textareaEl= document.getElementById('noteDialogText');
-
-            titleEl.textContent    = existingNote ? 'Редактировать заметку' : 'Новая заметка';
-            quoteEl.textContent    = quoteText || '';
-            textareaEl.value       = existingNote ? (existingNote.text || '') : '';
-            overlay.dataset.cfi    = cfiJson ? JSON.stringify(cfiJson) : '';
-
-            overlay.classList.add('visible');
-            setTimeout(() => textareaEl.focus(), 60);
-        }
-
-        // ── Закрыть диалог ────────────────────────────────────────────
-        function closeNoteDialog() {
-            document.getElementById('noteDialogOverlay').classList.remove('visible');
-            _noteDialogHighlightId = null;
-            _noteDialogNoteId      = null;
-        }
-
-        // ── Сохранить заметку из диалога ──────────────────────────────
-        function saveNoteFromDialog() {
-            const text = document.getElementById('noteDialogText').value.trim();
-            if (!text) { closeNoteDialog(); return; }
-
-            if (!bridge) { closeNoteDialog(); return; }
-
-            const cfiRaw = document.getElementById('noteDialogOverlay').dataset.cfi || '';
-
-            if (_noteDialogNoteId) {
-            // Редактирование существующей заметки
-            bridge.updateNote(_noteDialogNoteId, text);
-            log(' Заметка обновлена', 'info');
-            } else {
-            // Новая заметка
-            bridge.saveNote(_noteDialogHighlightId, text, cfiRaw);
-            log(' Заметка сохранена', 'info');
-            }
-
-            closeNoteDialog();
-            // Обновляем панель если открыта
-            if (document.getElementById('highlightsPanel').classList.contains('visible')) {
-            renderHighlightsPanel();
-            }
-        }
-
+        // Панель выделений/заметок (HL_COLOR_MAP, openNoteDialog,
+        // closeNoteDialog, saveNoteFromDialog, renderHighlightsPanel,
+        // _escHtml/_escAttr) вынесена в bookmarks-highlights.js.
+        // Обработчики кнопок диалога заметки остаются здесь, так как это
+        // разовая инициализация DOM-элементов при загрузке страницы:
         // ── Кнопки диалога ────────────────────────────────────────────
         document.getElementById('noteDialogClose')?.addEventListener('click', closeNoteDialog);
         document.getElementById('noteDialogCancel')?.addEventListener('click', closeNoteDialog);
@@ -6287,208 +5975,6 @@
             if (e.key === 'Escape') closeNoteDialog();
         });
 
-        // ── Рендер панели выделений / заметок ────────────────────────
-        let _hlFilterActive = 'all';  // 'all' | 'highlight' | 'notes'
-
-        async function renderHighlightsPanel() {
-            const listEl = document.getElementById('highlightsList');
-            if (!listEl || !bridge) return;
-
-            // Загружаем данные параллельно
-            const [hlJson, notesJson] = await Promise.all([
-            new Promise(r => bridge.getHighlights(r)),
-            new Promise(r => bridge.getNotes(r)),
-            ]);
-
-            let highlights = [];
-            let notes = [];
-            try { highlights = JSON.parse(hlJson) || []; } catch(e) {}
-            try { notes      = JSON.parse(notesJson) || []; } catch(e) {}
-
-            // Индексируем заметки по highlight_id
-            const notesByHl = {};
-            const freeNotes = [];  // заметки без выделения
-            for (const n of notes) {
-            if (n.highlight_id) {
-                if (!notesByHl[n.highlight_id]) notesByHl[n.highlight_id] = [];
-                notesByHl[n.highlight_id].push(n);
-            } else {
-                freeNotes.push(n);
-            }
-            }
-
-            // Фильтр
-            let items = [];
-            if (_hlFilterActive === 'all') {
-            // Объединяем: выделения + свободные заметки, сортируем по дате
-            items = [
-                ...highlights.map(h => ({ type: 'highlight', data: h,
-                ts: h.timestamp || '' })),
-                ...freeNotes.map(n => ({ type: 'note', data: n,
-                ts: n.timestamp || '' })),
-            ].sort((a, b) => b.ts.localeCompare(a.ts));
-            } else if (_hlFilterActive === 'highlight') {
-            items = highlights.map(h => ({ type: 'highlight', data: h,
-                ts: h.timestamp || '' }))
-                .sort((a, b) => b.ts.localeCompare(a.ts));
-            } else {
-            items = notes.map(n => ({ type: 'note', data: n,
-                ts: n.timestamp || '' }))
-                .sort((a, b) => b.ts.localeCompare(a.ts));
-            }
-
-            if (!items.length) {
-            listEl.innerHTML = '<div class="hl-empty">Нет выделений и заметок</div>';
-            return;
-            }
-
-            listEl.innerHTML = '';
-
-            for (const item of items) {
-            const el = document.createElement('div');
-            el.className = 'hl-item';
-
-            if (item.type === 'highlight') {
-                const h = item.data;
-                const color  = HL_COLOR_MAP[h.color] || HL_COLOR_MAP.default;
-                const linked = notesByHl[h.id] || [];
-                const dateStr = h.timestamp ? new Date(h.timestamp)
-                .toLocaleDateString('ru-RU', {day:'numeric',month:'short'}) : '';
-
-                let noteHtml = '';
-                for (const n of linked) {
-                noteHtml += `<div class="hl-item-note">${_escHtml(n.text)
-                    }<span class="hl-action-btn" style="float:right;opacity:.7;"
-                    data-edit-note="${n.id}"
-                    data-hl-id="${h.id}"
-                    data-hl-text="${_escAttr(h.text || '')}"
-                    title="Редактировать">
-                    <span class="material-icons" style="font-size:12px;">edit</span>
-                    </span></div>`;
-                }
-
-                el.innerHTML = `
-                  <div style="display:flex;gap:8px;align-items:flex-start;">
-                <div class="hl-item-color-bar" style="background:${color};min-height:40px;"></div>
-                <div class="hl-item-body">
-                  <div class="hl-item-text">${_escHtml(h.text || '')}</div>
-                  ${noteHtml}
-                    <button class="hl-action-btn" data-add-note="${h.id}"
-                        data-hl-text="${_escAttr(h.text||'')}">
-                      <span class="material-icons">edit_note</span>Заметка
-                    </button>
-                    <button class="hl-action-btn" data-copy-text="${_escAttr(h.text||'')}">
-                      <span class="material-icons">content_copy</span>
-                    </button>
-                    <button class="hl-action-btn" data-delete-hl="${h.id}"
-                        style="margin-left:auto;color:#f28b82;">
-                      <span class="material-icons">delete_outline</span>
-                    </button>
-                  </div>
-                </div>
-                  </div>`;
-
-            } else {
-                // Свободная заметка (без выделения)
-                const n = item.data;
-                const dateStr = n.timestamp ? new Date(n.timestamp)
-                .toLocaleDateString('ru-RU', {day:'numeric',month:'short'}) : '';
-                el.innerHTML = `
-                  <div style="display:flex;gap:8px;align-items:flex-start;">
-                <div class="hl-item-color-bar"
-                     style="background:#7ecfff;min-height:40px;"></div>
-                <div class="hl-item-body">
-                  <div class="hl-item-text" style="color:#7ecfff;"> Заметка</div>
-                  <div class="hl-item-note">${_escHtml(n.text)}</div>
-                  <div class="hl-item-meta">${dateStr}</div>
-                  <div class="hl-item-actions">
-                    <button class="hl-action-btn" data-edit-note="${n.id}"
-                        data-hl-text="">
-                      <span class="material-icons">edit</span>Изменить
-                    </button>
-                    <button class="hl-action-btn" data-delete-note="${n.id}"
-                        style="margin-left:auto;color:#f28b82;">
-                      <span class="material-icons">delete_outline</span>
-                    </button>
-                  </div>
-                </div>
-                  </div>`;
-            }
-
-            listEl.appendChild(el);
-            }
-
-            // ── Делегированные обработчики кликов ────────────────────
-            listEl.onclick = (e) => {
-            const btn = e.target.closest('[data-goto-cfi],[data-add-note],[data-delete-hl],[data-copy-text],[data-edit-note],[data-delete-note]');
-            if (!btn) return;
-
-            if (btn.dataset.gotoCfi !== undefined) {
-                const cfiRaw = btn.dataset.gotoCfi;
-                if (cfiRaw) {
-                try {
-                    const cfiObj = JSON.parse(cfiRaw);
-                    if (cfiObj.section !== undefined && cfiObj.cfi) {
-                    view.goToSection(cfiObj.section)
-                        .then(() => view.goTo(cfiObj.cfi))
-                        .catch(() => {});
-                    } else if (cfiObj.cfi) {
-                    view.goTo(cfiObj.cfi).catch(() => {});
-                    }
-                } catch(e) {}
-                }
-                document.getElementById('highlightsPanel').classList.remove('visible');
-                document.getElementById('overlay').classList.remove('visible');
-            }
-
-            if (btn.dataset.addNote !== undefined) {
-                openNoteDialog(btn.dataset.addNote, btn.dataset.hlText || '', null, null);
-            }
-
-            if (btn.dataset.editNote !== undefined) {
-                // Ищем заметку в списке для редактирования
-                bridge.getNotes(njson => {
-                try {
-                    const allNotes = JSON.parse(njson) || [];
-                    const found = allNotes.find(n => n.id === btn.dataset.editNote);
-                    openNoteDialog(
-                    btn.dataset.hlId || '',
-                    btn.dataset.hlText || '',
-                    found || null, null);
-                } catch(e) {}
-                });
-            }
-
-            if (btn.dataset.deleteHl !== undefined) {
-                if (confirm('Удалить выделение?')) {
-                bridge.removeHighlight(btn.dataset.deleteHl);
-                // Визуально убираем из overlayer
-                try { getOverlayer()?.remove(btn.dataset.deleteHl); } catch(e) {}
-                renderHighlightsPanel();
-                }
-            }
-
-            if (btn.dataset.deleteNote !== undefined) {
-                if (confirm('Удалить заметку?')) {
-                bridge.removeNote(btn.dataset.deleteNote);
-                renderHighlightsPanel();
-                }
-            }
-
-            if (btn.dataset.copyText !== undefined) {
-                if (bridge) bridge.copyToClipboard(btn.dataset.copyText);
-            }
-            };
-        }
-
-        // ── Вспомогательные функции ────────────────────────────────────
-        function _escHtml(s) {
-            return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
-            .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-        }
-        function _escAttr(s) {
-            return (s || '').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-        }
 
         // ── Кнопка закрытия панели ────────────────────────────────────
         safeAddListener('closeHighlightsBtn', 'click', () => {
@@ -6502,7 +5988,7 @@
             document.querySelectorAll('.hl-filter-btn')
                 .forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            _hlFilterActive = btn.dataset.filter;
+            setHighlightsFilter(btn.dataset.filter);
             renderHighlightsPanel();
             });
         });
@@ -6787,6 +6273,22 @@
             }
 
             safeAddListener('ttsPrevBtn', 'click', () => _navAction(async () => {
+                const cur = ttsSentences[ttsSentenceIndex];
+                // Разрывное предложение на транше 2 → возвращаемся к траншу 1
+                // БЕЗ обратного перелистывания: страница уже перевёрнута вперёд для
+                // транша 2, а текст транша 1 физически остался на предыдущей
+                // странице — но пользователь жмёт "предыдущее", ожидая услышать
+                // начало ЭТОГО ЖЕ предложения ещё раз, а не два коротких прыжка
+                // туда-обратно. Проще и предсказуемее: просто повторить транш 1
+                // на текущей (уже перевёрнутой) странице — он всё равно короткий.
+                if (cur && cur.isSplitSentence && cur.partIndex > 0) {
+                    cur.partIndex--;
+                    ttsPaused = false;
+                    ttsActive = true; ttsStarting = true; setTimeout(() => { ttsStarting = false; }, 500);
+                    updateTTSButtons();
+                    await speakCurrentSentence();   // без обратного перелистывания (как раньше)
+                    return;
+                }
                 if (ttsSentenceIndex <= 0) return;
                 ttsSentenceIndex--;
                 ttsPaused = false;
@@ -6796,6 +6298,26 @@
             }));
 
             safeAddListener('ttsNextBtn', 'click', () => _navAction(async () => {
+                // Разрывное предложение на транше 1 → сначала дочитать транш 2 с
+                // перелистыванием (тот же путь, что и в window.ttsNext), а уже потом
+                // переходить к следующему предложению по повторному нажатию.
+                const cur = ttsSentences[ttsSentenceIndex];
+                if (cur && cur.isSplitSentence && cur.partIndex < cur.parts.length - 1) {
+                    cur.partIndex++;
+                    ttsPaused = false;
+                    ttsActive = true; ttsStarting = true; setTimeout(() => { ttsStarting = false; }, 500);
+                    updateTTSButtons();
+                    ttsPageTurning = true;
+                    await new Promise(resolve => {
+                        view.renderer.addEventListener('relocate', () => resolve(), { once: true });
+                        setTimeout(resolve, 1500);
+                        view.renderer.next();
+                    });
+                    await new Promise(r => setTimeout(r, 60));
+                    ttsPageTurning = false;
+                    await speakCurrentSentence();
+                    return;
+                }
                 if (ttsSentenceIndex < ttsSentences.length - 1) {
                     ttsSentenceIndex++;
                     ttsPaused = false;
@@ -6978,6 +6500,9 @@
 
             // Коррекция произношения TTS
             safeAddListener('quickActionsBtn', 'click', () => bridge?.showTTSCorrection());
+
+            // Рекордер аудиокниг — запись текущей/выбранной главы в MP3
+            safeAddListener('audioRecorderBtn', 'click', () => bridge?.showAudioRecorder());
 
             // Отладка
             safeAddListener('clearDebugBtn', 'click', () => {
